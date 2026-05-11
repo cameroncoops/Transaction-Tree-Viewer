@@ -20,13 +20,113 @@ import {
   queryBasicLinkedTableFeatureAttributes,
   type BasicLinkedTableRecord
 } from './lib/feature-attributes'
-import WidgetStatusPanel from './components/WidgetStatusPanel'
-import FieldMapPanel from './components/FieldMapPanel'
 import StructureTree from './components/StructureTree'
 
 const { useEffect, useRef, useState } = React
 
 const ACTIVE_FEATURE_DS_PAGE_SIZE = 2000
+const ACCENT_COLOR = '#007ac2'
+
+const PAGE_STYLE = {
+  height: '100%',
+  overflowY: 'auto' as const,
+  boxSizing: 'border-box' as const,
+  background: '#ffffff'
+}
+
+const CONTENT_STYLE = {
+  display: 'flex',
+  flexDirection: 'column' as const,
+  gap: '0.45rem',
+  padding: '0.55rem'
+}
+
+const HEADER_STYLE = {
+  display: 'flex',
+  alignItems: 'baseline',
+  gap: '0.45rem',
+  marginBottom: '0.35rem'
+}
+
+const HEADER_TITLE_STYLE = {
+  margin: 0,
+  fontSize: '1.15rem',
+  fontWeight: 700,
+  lineHeight: 1.2,
+  color: '#202020'
+}
+
+const HEADER_SUBTITLE_STYLE = {
+  color: '#999999',
+  fontSize: '0.78rem'
+}
+
+const FILTER_ROW_STYLE = {
+  display: 'flex',
+  flexWrap: 'wrap' as const,
+  gap: '0.45rem',
+  alignItems: 'center',
+  marginBottom: '0.35rem'
+}
+
+const FILTER_PLACEHOLDER_STYLE = {
+  minWidth: '8.5rem',
+  maxWidth: '11rem',
+  padding: '0.45rem 0.6rem',
+  border: '1px solid #d0d0d0',
+  borderRadius: '3px',
+  backgroundColor: '#f7f7f7',
+  color: '#8a8a8a',
+  fontSize: '0.82rem'
+}
+
+const ACTION_ROW_STYLE = {
+  display: 'flex',
+  flexWrap: 'wrap' as const,
+  alignItems: 'center',
+  gap: '0.35rem',
+  marginBottom: '0.25rem',
+  color: '#777777',
+  fontSize: '0.86rem'
+}
+
+const LINK_BUTTON_STYLE = {
+  background: 'none',
+  border: 'none',
+  color: ACCENT_COLOR,
+  textDecoration: 'underline',
+  cursor: 'pointer',
+  padding: 0,
+  fontSize: '0.86rem'
+}
+
+const ISOLATE_HEADER_STYLE = {
+  display: 'grid',
+  gridTemplateColumns: '3.25rem 1fr',
+  alignItems: 'center',
+  gap: '0.25rem',
+  padding: '0.25rem 0',
+  borderBottom: '1px solid #e2e2e2',
+  color: '#666666',
+  fontSize: '0.72rem',
+  fontWeight: 700,
+  letterSpacing: '0.04em',
+  textTransform: 'uppercase' as const
+}
+
+const MESSAGE_PANEL_STYLE = {
+  padding: '0.5rem 0.6rem',
+  border: '1px solid #f0c8c8',
+  backgroundColor: '#fff5f5',
+  color: '#a12626',
+  fontSize: '0.85rem'
+}
+
+const EMPTY_STATE_STYLE = {
+  padding: '0.5rem',
+  color: '#666666',
+  fontSize: '0.9rem'
+}
 
 interface ActiveFeatureDataSourceQuery
 {
@@ -61,6 +161,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
   const [recordCount, setRecordCount] = useState(0)
   const [availableFieldNames, setAvailableFieldNames] = useState<string[]>([])
   const [structureHierarchy, setStructureHierarchy] = useState<StructureNode[]>([])
+  const [isolatedTopLevelValues, setIsolatedTopLevelValues] = useState<string[]>([])
   const [expandedNodeKeys, setExpandedNodeKeys] = useState<string[]>([])
   const [selectedFeatureUid, setSelectedFeatureUid] = useState('')
   const [selectionError, setSelectionError] = useState('')
@@ -71,6 +172,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
 
   const highlightHandleRef = useRef<HighlightHandle | null>(null)
   const mapClickHandleRef = useRef<ViewEventHandle | null>(null)
+  const activeIsolateLayerViewRef = useRef<any | null>(null)
   const featureRowRefs = useRef<{ [key: string]: HTMLDivElement | null }>({})
   const lastAutoScrolledFeatureUidRef = useRef('')
   const featureAttributeRequestIdRef = useRef(0)
@@ -232,6 +334,21 @@ const Widget = (props: AllWidgetProps<Config>) => {
 
   const collapseAll = () => {
     setExpandedNodeKeys([])
+  }
+
+  const toggleTopLevelIsolation = (topLevelValue: string) => {
+    setIsolatedTopLevelValues((previous) => {
+      if (previous.includes(topLevelValue))
+      {
+        return previous.filter((value) => value !== topLevelValue)
+      }
+
+      return [...previous, topLevelValue]
+    })
+  }
+
+  const clearIsolation = () => {
+    setIsolatedTopLevelValues([])
   }
 
   const toggleFeatureAttribute = (feature_uid: string, featureAttribute: FeatureAttributeConfig) => {
@@ -593,6 +710,65 @@ const Widget = (props: AllWidgetProps<Config>) => {
     void loadFeatureAttributes()
   }, [expandedFeatureAttributeKeys, structureFieldMap, featureAttributeRecords, loadingFeatureAttributeKeys])
 
+
+  useEffect(() => {
+    const previousIsolateLayerView = activeIsolateLayerViewRef.current
+
+    if (previousIsolateLayerView)
+    {
+      try
+      {
+        previousIsolateLayerView.filter = null
+      }
+      catch (error)
+      {
+        console.warn('Failed to clear previous isolate filter', error)
+      }
+
+      activeIsolateLayerViewRef.current = null
+    }
+
+    if (!jimuMapView || !structureFieldMap || isolatedTopLevelValues.length === 0)
+    {
+      return
+    }
+
+    const topLevelField = structureFieldMap.hierarchyFields[0]
+
+    if (!topLevelField)
+    {
+      return
+    }
+
+    const matchingJimuLayerView = findMatchingJimuLayerViewRef.current()
+    const jsApiLayerView = matchingJimuLayerView?.view
+    const jsApiLayer = matchingJimuLayerView?.layer || jsApiLayerView?.layer
+
+    if (!jsApiLayerView || !jsApiLayer)
+    {
+      return
+    }
+
+    const requestedTopLevelFieldName = topLevelField.fieldName
+    const topLevelFieldName = getLayerFieldName(jsApiLayer, requestedTopLevelFieldName)
+    const escapedValues = isolatedTopLevelValues.map((value) => {
+      return `'${escapeSqlValue(value)}'`
+    })
+
+    try
+    {
+      jsApiLayerView.filter = {
+        where: `${topLevelFieldName} IN (${escapedValues.join(', ')})`
+      }
+
+      activeIsolateLayerViewRef.current = jsApiLayerView
+    }
+    catch (error)
+    {
+      console.warn('Failed to apply isolate filter', error)
+    }
+  }, [isolatedTopLevelValues, jimuMapView, activeFeatureDs, props.config?.fieldMapJson])
+
   useEffect(() => {
     clearMapClickHandle()
 
@@ -680,28 +856,39 @@ const Widget = (props: AllWidgetProps<Config>) => {
     return () => {
       clearMapClickHandle()
       clearMapHighlight()
+
+      if (activeIsolateLayerViewRef.current)
+      {
+        try
+        {
+          activeIsolateLayerViewRef.current.filter = null
+        }
+        catch (error)
+        {
+          console.warn('Failed to clear isolate filter during cleanup', error)
+        }
+
+        activeIsolateLayerViewRef.current = null
+      }
     }
   }, [])
 
   if (!props.useDataSources || props.useDataSources.length < 1)
   {
     return (
-      <div className="p-3">
-        <h3>Active Feature Explorer</h3>
-        <p>Select the Active Feature Class data source in widget settings.</p>
+      <div style={PAGE_STYLE}>
+        <div style={CONTENT_STYLE}>
+          <div style={HEADER_STYLE}>
+            <h3 style={HEADER_TITLE_STYLE}>Transaction Tree Viewer</h3>
+          </div>
+          <div style={EMPTY_STATE_STYLE}>Select the Active Feature Class data source in widget settings.</div>
+        </div>
       </div>
     )
   }
 
   return (
-    <div
-      className="p-3"
-      style={{
-        height: '100%',
-        overflowY: 'auto',
-        boxSizing: 'border-box'
-      }}
-    >
+    <div style={PAGE_STYLE}>
       <DataSourceComponent
         useDataSource={props.useDataSources[0]}
         query={dataSourceQuery}
@@ -740,6 +927,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
           setRecordCount(0)
           setAvailableFieldNames([])
           setStructureHierarchy([])
+          setIsolatedTopLevelValues([])
           setExpandedNodeKeys([])
           setExpandedFeatureAttributeKeys([])
           setLoadingFeatureAttributeKeys({})
@@ -762,46 +950,97 @@ const Widget = (props: AllWidgetProps<Config>) => {
         />
       )}
 
-      <h3>Active Feature Explorer</h3>
+      <div style={CONTENT_STYLE}>
+        <div style={HEADER_STYLE}>
+          <h3 style={HEADER_TITLE_STYLE}>Transaction Tree Viewer</h3>
+          <span style={HEADER_SUBTITLE_STYLE}>
+            {isLoadingFeatures ? 'Loading...' : `${recordCount.toLocaleString()} records`}
+          </span>
+        </div>
 
-      <WidgetStatusPanel
-        isDatasourceConnected={!!activeFeatureDs}
-        isMapConnected={!!jimuMapView}
-        isLoadingFeatures={isLoadingFeatures}
-        loadError={loadError}
-        recordCount={recordCount}
-      />
+        <div style={FILTER_ROW_STYLE} aria-disabled="true">
+          <div style={FILTER_PLACEHOLDER_STYLE}>Search coming soon</div>
+          <div style={FILTER_PLACEHOLDER_STYLE}>Building / Zone</div>
+          <div style={FILTER_PLACEHOLDER_STYLE}>Level</div>
+          <div style={FILTER_PLACEHOLDER_STYLE}>Type / Status</div>
+        </div>
 
-      <FieldMapPanel
-        fieldMapParseResult={fieldMapParseResult}
-        fieldValidationResult={fieldValidationResult}
-        availableFieldNames={availableFieldNames}
-      />
+        <div style={ACTION_ROW_STYLE}>
+          <button
+            type="button"
+            onClick={clearIsolation}
+            disabled={isolatedTopLevelValues.length === 0}
+            style={{
+              ...LINK_BUTTON_STYLE,
+              color: isolatedTopLevelValues.length === 0 ? '#888888' : ACCENT_COLOR,
+              cursor: isolatedTopLevelValues.length === 0 ? 'not-allowed' : 'pointer',
+              textDecoration: isolatedTopLevelValues.length === 0 ? 'none' : 'underline'
+            }}
+          >
+            Clear Isolate
+          </button>
+          <span>|</span>
+          <button
+            type="button"
+            onClick={clearSelectedFeature}
+            style={LINK_BUTTON_STYLE}
+          >
+            Clear Selection
+          </button>
+          <span>|</span>
+          <button
+            type="button"
+            onClick={collapseAll}
+            style={LINK_BUTTON_STYLE}
+          >
+            Collapse All
+          </button>
+          <span>|</span>
+          <button
+            type="button"
+            onClick={expandAll}
+            style={LINK_BUTTON_STYLE}
+          >
+            Expand All
+          </button>
+        </div>
 
-      {selectionError !== '' && (
-        <p style={{ color: '#c62828' }}>{selectionError}</p>
-      )}
+        <div style={ISOLATE_HEADER_STYLE}>
+          <span>Isolate</span>
+          <span>Structure</span>
+        </div>
 
-      {fieldValidationResult && fieldValidationResult.isValid && structureFieldMap && (
-        <StructureTree
-          structureHierarchy={structureHierarchy}
-          structureFieldMap={structureFieldMap}
-          selectedFeatureUid={selectedFeatureUid}
-          expandedNodeKeys={expandedNodeKeys}
-          expandedFeatureAttributeKeys={expandedFeatureAttributeKeys}
-          loadingFeatureAttributeKeys={loadingFeatureAttributeKeys}
-          featureAttributeRecords={featureAttributeRecords}
-          featureAttributeErrors={featureAttributeErrors}
-          onToggleNode={toggleNode}
-          onExpandAll={expandAll}
-          onCollapseAll={collapseAll}
-          onFeatureClick={handleFeatureClick}
-          onFeatureRowRef={(feature_uid, element) => {
-            featureRowRefs.current[feature_uid] = element
-          }}
-          onToggleFeatureAttribute={toggleFeatureAttribute}
-        />
-      )}
+        {loadError !== '' && (
+          <div style={MESSAGE_PANEL_STYLE}>{loadError}</div>
+        )}
+
+        {selectionError !== '' && (
+          <div style={MESSAGE_PANEL_STYLE}>{selectionError}</div>
+        )}
+
+        {fieldValidationResult && fieldValidationResult.isValid && structureFieldMap && (
+          <StructureTree
+            structureHierarchy={structureHierarchy}
+            structureFieldMap={structureFieldMap}
+            selectedFeatureUid={selectedFeatureUid}
+            expandedNodeKeys={expandedNodeKeys}
+            expandedFeatureAttributeKeys={expandedFeatureAttributeKeys}
+            loadingFeatureAttributeKeys={loadingFeatureAttributeKeys}
+            featureAttributeRecords={featureAttributeRecords}
+            featureAttributeErrors={featureAttributeErrors}
+            isolatedTopLevelValues={isolatedTopLevelValues}
+            onToggleTopLevelIsolation={toggleTopLevelIsolation}
+            onToggleNode={toggleNode}
+            onExpandAll={expandAll}
+            onCollapseAll={collapseAll}
+            onFeatureClick={handleFeatureClick}
+            onFeatureRowRef={(feature_uid, element) => {
+              featureRowRefs.current[feature_uid] = element
+            }}
+            onToggleFeatureAttribute={toggleFeatureAttribute}
+          />
+        )}
+      </div>
     </div>
   )
 }
