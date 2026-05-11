@@ -1,11 +1,16 @@
 import { React } from 'jimu-core'
-import type { FeatureAttributeConfig, StructureFieldMap } from '../lib/field-map'
+import type {
+  FeatureAttributeConfig,
+  StructureFieldMap,
+} from '../lib/field-map'
 import type { BasicLinkedTableRecord } from '../lib/feature-attributes'
-import type { AppendedDisplayValue, StructureNode } from '../lib/structure-model'
+import type {
+  AppendedDisplayValue,
+  StructureNode,
+} from '../lib/structure-model'
 import FeatureAttributes from './FeatureAttributes'
 
-interface StructureTreeProps
-{
+interface StructureTreeProps {
   structureHierarchy: StructureNode[]
   structureFieldMap: StructureFieldMap
   selectedFeatureUid: string
@@ -21,7 +26,10 @@ interface StructureTreeProps
   onCollapseAll: () => void
   onFeatureClick: (node: StructureNode) => void
   onFeatureRowRef: (feature_uid: string, element: HTMLDivElement | null) => void
-  onToggleFeatureAttribute: (feature_uid: string, featureAttribute: FeatureAttributeConfig) => void
+  onToggleFeatureAttribute: (
+    feature_uid: string,
+    featureAttribute: FeatureAttributeConfig,
+  ) => void
 }
 
 const ACCENT_COLOR = '#1f6f8b'
@@ -30,21 +38,21 @@ const SECONDARY_TEXT_COLOR = '#8a8a8a'
 
 const PANEL_STYLE = {
   backgroundColor: '#ffffff',
-  padding: '0.15rem 0 0 0'
+  padding: 0,
 }
 
 const TREE_TOGGLE_STYLE = {
   background: 'none',
   border: 'none',
-  color: '#444',
+  color: '#24352b',
   textDecoration: 'none',
   fontWeight: 700,
-  minWidth: '0.8rem',
-  width: '0.8rem',
+  minWidth: '1rem',
+  width: '1rem',
   padding: 0,
-  fontSize: '0.72rem',
+  fontSize: '0.8rem',
   lineHeight: 1,
-  cursor: 'pointer'
+  cursor: 'pointer',
 }
 
 const FEATURE_BUTTON_STYLE = {
@@ -54,45 +62,48 @@ const FEATURE_BUTTON_STYLE = {
   background: 'transparent',
   padding: 0,
   cursor: 'pointer',
-  color: '#1c2733',
-  lineHeight: 1.35
+  color: '#1f2f26',
+  lineHeight: 1.45,
+  fontSize: '0.95rem',
 }
 
 const APPENDED_VALUES_STYLE = {
   fontWeight: 400,
   color: SECONDARY_TEXT_COLOR,
-  fontSize: '0.88rem'
+  fontSize: '0.9rem',
+  marginLeft: '0.4rem',
 }
 
 const EMPTY_STATE_STYLE = {
   color: MUTED_TEXT_COLOR,
   lineHeight: 1.5,
-  padding: '0.35rem 0'
+  padding: '0.35rem 0',
 }
 
 const TOP_LEVEL_ROW_STYLE = {
   display: 'grid',
-  gridTemplateColumns: '3.25rem 1fr',
-  columnGap: '0.25rem',
+  gridTemplateColumns: '5.5rem 1fr',
+  columnGap: '0.5rem',
   alignItems: 'start',
-  marginBottom: '0.18rem'
+  borderBottom: '1px solid #edf1ed',
 }
 
 const TOP_LEVEL_ISOLATE_CELL_STYLE = {
   textAlign: 'center' as const,
-  paddingTop: '0.12rem'
+  paddingTop: '0.75rem',
 }
 
 const CHECKBOX_STYLE = {
-  width: '0.95rem',
-  height: '0.95rem',
+  width: '1.05rem',
+  height: '1.05rem',
   accentColor: ACCENT_COLOR,
-  cursor: 'pointer'
+  cursor: 'pointer',
 }
 
 const CHILDREN_STYLE = {
-  marginLeft: '1.15rem',
-  marginTop: '0.18rem'
+  marginLeft: '1.75rem',
+  marginTop: '0.25rem',
+  paddingBottom: '0.55rem',
 }
 
 const getTreeToggleIcon = (isExpanded: boolean): string => {
@@ -102,18 +113,17 @@ const getTreeToggleIcon = (isExpanded: boolean): string => {
 const getSelectedFeatureRowStyle = (isSelected: boolean) => {
   return {
     marginBottom: '0.18rem',
-    padding: isSelected ? '0.18rem 0.4rem' : '0.08rem 0',
-    marginLeft: isSelected ? '-0.4rem' : 0,
-    borderLeft: isSelected ? `3px solid ${ACCENT_COLOR}` : '3px solid transparent',
-    backgroundColor: isSelected ? '#eef7fd' : 'transparent',
-    borderRadius: '4px'
+    padding: isSelected ? '0.45rem 0.65rem' : '0.18rem 0',
+    marginLeft: isSelected ? '-0.65rem' : 0,
+    backgroundColor: isSelected ? '#edf7e8' : 'transparent',
+    borderRadius: '5px',
   }
 }
 
 const getGroupRowStyle = () => {
   return {
     marginBottom: '0.18rem',
-    padding: '0.08rem 0'
+    padding: '0.65rem 0 0.55rem 0',
   }
 }
 
@@ -122,8 +132,7 @@ const formatDateParts = (date: Date, includeTime: boolean): string => {
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const year = String(date.getFullYear())
 
-  if (!includeTime)
-  {
+  if (!includeTime) {
     return `${day}/${month}/${year}`
   }
 
@@ -134,35 +143,29 @@ const formatDateParts = (date: Date, includeTime: boolean): string => {
 }
 
 const tryParseDateValue = (value: unknown): Date | null => {
-  if (value instanceof Date)
-  {
+  if (value instanceof Date) {
     return Number.isNaN(value.getTime()) ? null : value
   }
 
-  if (typeof value === 'number')
-  {
+  if (typeof value === 'number') {
     const date = new Date(value)
 
     return Number.isNaN(date.getTime()) ? null : date
   }
 
-  if (typeof value === 'string')
-  {
+  if (typeof value === 'string') {
     const trimmedValue = value.trim()
 
-    if (trimmedValue === '')
-    {
+    if (trimmedValue === '') {
       return null
     }
 
     const numericValue = Number(trimmedValue)
 
-    if (!Number.isNaN(numericValue) && trimmedValue !== '')
-    {
+    if (!Number.isNaN(numericValue) && trimmedValue !== '') {
       const numericDate = new Date(numericValue)
 
-      if (!Number.isNaN(numericDate.getTime()))
-      {
+      if (!Number.isNaN(numericDate.getTime())) {
         return numericDate
       }
     }
@@ -178,35 +181,30 @@ const tryParseDateValue = (value: unknown): Date | null => {
 const formatAppendedValue = (displayValue: AppendedDisplayValue): string => {
   const format = displayValue.format || 'text'
 
-  if (format === 'number')
-  {
-    const numericValue = typeof displayValue.value === 'number'
-      ? displayValue.value
-      : Number(displayValue.value)
+  if (format === 'number') {
+    const numericValue =
+      typeof displayValue.value === 'number'
+        ? displayValue.value
+        : Number(displayValue.value)
 
-    if (!Number.isNaN(numericValue))
-    {
+    if (!Number.isNaN(numericValue)) {
       return numericValue.toLocaleString('en-AU')
     }
   }
 
-  if (format === 'date' || format === 'datetime')
-  {
+  if (format === 'date' || format === 'datetime') {
     const parsedDate = tryParseDateValue(displayValue.value)
 
-    if (parsedDate)
-    {
+    if (parsedDate) {
       return formatDateParts(parsedDate, format === 'datetime')
     }
   }
 
-  if (typeof displayValue.value === 'string')
-  {
+  if (typeof displayValue.value === 'string') {
     return displayValue.value
   }
 
-  if (displayValue.value instanceof Date)
-  {
+  if (displayValue.value instanceof Date) {
     return Number.isNaN(displayValue.value.getTime())
       ? String(displayValue.value)
       : displayValue.value.toString()
@@ -215,22 +213,28 @@ const formatAppendedValue = (displayValue: AppendedDisplayValue): string => {
   return String(displayValue.value)
 }
 
-const renderAppendedDisplayValues = (node: StructureNode): JSX.Element | null => {
-  if (!node.appendedDisplayValues || node.appendedDisplayValues.length < 1)
-  {
+const renderAppendedDisplayValues = (
+  node: StructureNode,
+): JSX.Element | null => {
+  if (!node.appendedDisplayValues || node.appendedDisplayValues.length < 1) {
     return null
   }
 
   return (
     <span style={APPENDED_VALUES_STYLE}>
-      {node.appendedDisplayValues.map((displayValue) => {
-        return `  ${displayValue.label}: ${formatAppendedValue(displayValue)}`
-      }).join('')}
+      {node.appendedDisplayValues
+        .map((displayValue) => {
+          return `  ${displayValue.label}: ${formatAppendedValue(displayValue)}`
+        })
+        .join('')}
     </span>
   )
 }
 
-const renderNodeContent = (node: StructureNode, props: StructureTreeProps): JSX.Element => {
+const renderNodeContent = (
+  node: StructureNode,
+  props: StructureTreeProps,
+): JSX.Element => {
   const isFeatureNode = !!node.feature_uid
   const isSelected = node.feature_uid === props.selectedFeatureUid
   const isExpanded = props.expandedNodeKeys.includes(node.nodeKey)
@@ -239,14 +243,19 @@ const renderNodeContent = (node: StructureNode, props: StructureTreeProps): JSX.
   return (
     <div
       ref={(element) => {
-        if (node.feature_uid)
-        {
+        if (node.feature_uid) {
           props.onFeatureRowRef(node.feature_uid, element)
         }
       }}
-      style={isFeatureNode ? getSelectedFeatureRowStyle(isSelected) : getGroupRowStyle()}
+      style={
+        isFeatureNode
+          ? getSelectedFeatureRowStyle(isSelected)
+          : getGroupRowStyle()
+      }
     >
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.25rem' }}>
+      <div
+        style={{ display: 'flex', alignItems: 'flex-start', gap: '0.25rem' }}
+      >
         {hasChildren && (
           <button
             type="button"
@@ -261,7 +270,9 @@ const renderNodeContent = (node: StructureNode, props: StructureTreeProps): JSX.
         )}
 
         {!hasChildren && (
-          <span style={{ display: 'inline-block', width: '0.8rem', minWidth: '0.8rem' }} />
+          <span
+            style={{ display: 'inline-block', width: '1rem', minWidth: '1rem' }}
+          />
         )}
 
         {isFeatureNode && (
@@ -272,17 +283,17 @@ const renderNodeContent = (node: StructureNode, props: StructureTreeProps): JSX.
             }}
             style={{
               ...FEATURE_BUTTON_STYLE,
-              fontWeight: isSelected ? 700 : 500
+              fontWeight: isSelected ? 700 : 500,
             }}
           >
-            {node.label}: {node.featureLabel || node.value}
+            {node.label} {node.featureLabel || node.value}
             {renderAppendedDisplayValues(node)}
           </button>
         )}
 
         {!isFeatureNode && (
           <span style={{ color: '#1c2733', lineHeight: 1.35, fontWeight: 700 }}>
-            {node.label}: {node.value}
+            {node.label} {node.value}
             {renderAppendedDisplayValues(node)}
           </span>
         )}
@@ -311,9 +322,12 @@ const renderNodeContent = (node: StructureNode, props: StructureTreeProps): JSX.
   )
 }
 
-const renderNode = (node: StructureNode, props: StructureTreeProps, isTopLevel: boolean): JSX.Element => {
-  if (isTopLevel)
-  {
+const renderNode = (
+  node: StructureNode,
+  props: StructureTreeProps,
+  isTopLevel: boolean,
+): JSX.Element => {
+  if (isTopLevel) {
     const isIsolated = props.isolatedTopLevelValues.includes(node.value)
 
     return (
@@ -331,18 +345,14 @@ const renderNode = (node: StructureNode, props: StructureTreeProps, isTopLevel: 
           />
         </div>
 
-        <div>
+        <div style={{ padding: '0 0.85rem 0 0' }}>
           {renderNodeContent(node, props)}
         </div>
       </div>
     )
   }
 
-  return (
-    <div key={node.nodeKey}>
-      {renderNodeContent(node, props)}
-    </div>
-  )
+  return <div key={node.nodeKey}>{renderNodeContent(node, props)}</div>
 }
 
 const StructureTree = (props: StructureTreeProps) => {

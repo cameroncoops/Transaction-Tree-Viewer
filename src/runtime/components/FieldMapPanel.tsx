@@ -94,6 +94,7 @@ const FieldMapPanel = (props: FieldMapPanelProps) => {
 
               <p style={VALUE_STYLE}>
                 {field.label}: {field.fieldName}{field.optional ? ' (optional)' : ''}
+                {field.filter === true ? ' (filter)' : ''}
               </p>
 
               {field.appendFields && field.appendFields.length > 0 && (
@@ -101,6 +102,7 @@ const FieldMapPanel = (props: FieldMapPanelProps) => {
                   {field.appendFields.map((appendField) => (
                     <li key={appendField.key}>
                       {appendField.label}: {appendField.fieldName}{appendField.format ? ` (${appendField.format})` : ''}
+                      {appendField.filter === true ? ' (filter)' : ''}
                     </li>
                   ))}
                 </ul>
