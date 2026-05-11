@@ -6,6 +6,7 @@ export interface FieldMapping {
 export interface HierarchyFieldMapping extends FieldMapping {
   key: string
   optional?: boolean
+  filter?: boolean
   appendFields?: AppendFieldMapping[]
 }
 
@@ -17,6 +18,13 @@ export type AppendFieldFormat = 'text' | 'date' | 'datetime' | 'number'
 export interface AppendFieldMapping extends FieldMapping {
   key: string
   format?: AppendFieldFormat
+  filter?: boolean
+}
+
+export interface PlaceholderFilterConfig {
+  id: string
+  key: string
+  label: string
 }
 
 export interface FeatureAttributeConfig {
@@ -60,7 +68,15 @@ const hasFieldName = (value: FieldMapping | undefined): boolean => {
 }
 
 const hasHierarchyField = (value: HierarchyFieldMapping | undefined): boolean => {
-  return !!value && hasText(value.key) && hasText(value.fieldName) && hasText(value.label)
+  if (!value || !hasText(value.key) || !hasText(value.fieldName) || !hasText(value.label)) {
+    return false
+  }
+
+  if (value.filter !== undefined && typeof value.filter !== 'boolean') {
+    return false
+  }
+
+  return true
 }
 
 const hasDisplayField = (value: FeatureAttributeDisplayField | undefined): boolean => {
@@ -69,6 +85,10 @@ const hasDisplayField = (value: FeatureAttributeDisplayField | undefined): boole
 
 const hasAppendField = (value: AppendFieldMapping | undefined): boolean => {
   if (!value || !hasText(value.key) || !hasText(value.fieldName) || !hasText(value.label)) {
+    return false
+  }
+
+  if (value.filter !== undefined && typeof value.filter !== 'boolean') {
     return false
   }
 
@@ -157,7 +177,7 @@ export const parseStructureFieldMap = (fieldMapJson: string | undefined): FieldM
     if (invalidHierarchyField) {
       return {
         fieldMap: null,
-        errorMessage: 'Each hierarchyFields entry must include key, fieldName, and label.'
+        errorMessage: 'Each hierarchyFields entry must include key, fieldName, and label. If supplied, filter must be true or false.'
       }
     }
 
@@ -188,7 +208,7 @@ export const parseStructureFieldMap = (fieldMapJson: string | undefined): FieldM
     if (invalidAppendField) {
       return {
         fieldMap: null,
-        errorMessage: 'Each appendFields entry must include key, fieldName, and label. Supported appendFields format values are text, date, datetime, and number.'
+        errorMessage: 'Each appendFields entry must include key, fieldName, and label. Supported appendFields format values are text, date, datetime, and number. If supplied, filter must be true or false.'
       }
     }
 
@@ -291,4 +311,41 @@ export const validateFieldMapAgainstAvailableFields = (fieldMap: StructureFieldM
     missingFieldNames,
     isValid: missingFieldNames.length === 0
   }
+}
+
+export const getPlaceholderFiltersFromFieldMap = (fieldMap: StructureFieldMap): PlaceholderFilterConfig[] => {
+  const placeholderFilters: PlaceholderFilterConfig[] = []
+  const seenPlaceholderKeys = new Set<string>()
+
+  fieldMap.hierarchyFields.forEach((field) => {
+    if (field.filter === true) {
+      const dedupeKey = `${field.key}|${field.fieldName}`.toLowerCase()
+
+      if (!seenPlaceholderKeys.has(dedupeKey)) {
+        seenPlaceholderKeys.add(dedupeKey)
+        placeholderFilters.push({
+          id: dedupeKey,
+          key: field.key,
+          label: field.label
+        })
+      }
+    }
+
+    ;(field.appendFields || []).forEach((appendField) => {
+      if (appendField.filter === true) {
+        const dedupeKey = `${appendField.key}|${appendField.fieldName}`.toLowerCase()
+
+        if (!seenPlaceholderKeys.has(dedupeKey)) {
+          seenPlaceholderKeys.add(dedupeKey)
+          placeholderFilters.push({
+            id: dedupeKey,
+            key: appendField.key,
+            label: appendField.label
+          })
+        }
+      }
+    })
+  })
+
+  return placeholderFilters
 }
