@@ -2,7 +2,7 @@
   "name": "TransactionDataSetTreeExplorer",
   "label": "TransactionDataSetTreeExplorer",
   "type": "widget",
-  "version": "1.14.2",
+  "version": "1.14.4",
   "exbVersion": "1.14.0",
   "author": "Cam Cooper",
   "description": "Reusable map-aware Experience Builder widget template.",

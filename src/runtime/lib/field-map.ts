@@ -25,6 +25,38 @@ export interface RelatedSummaryConfig
   format?: FieldValueFormat
 }
 
+export interface RelatedBreakdownGroupField
+{
+  key?: string
+  fieldName: string
+  label: string
+  format?: FieldValueFormat
+}
+
+export interface RelatedBreakdownChildConfig
+{
+  key: string
+  label: string
+  groupBy: RelatedBreakdownGroupField[]
+  sumField?: string
+  sumLabel?: string
+  format?: FieldValueFormat
+}
+
+export interface RelatedBreakdownConfig
+{
+  key: string
+  label: string
+  relatedSourceKey: string
+  joinField: string
+  relatedJoinField: string
+  groupBy: RelatedBreakdownGroupField[]
+  sumField: string
+  sumLabel?: string
+  format?: FieldValueFormat
+  children?: RelatedBreakdownChildConfig[]
+}
+
 export interface HierarchyFieldMapping extends FieldMapping
 {
   key: string
@@ -32,6 +64,7 @@ export interface HierarchyFieldMapping extends FieldMapping
   filter?: boolean
   appendFields?: HierarchyAppendFieldMapping[]
   relatedSummaries?: RelatedSummaryConfig[]
+  relatedBreakdowns?: RelatedBreakdownConfig[]
 }
 
 export interface FeatureAttributeDisplayField extends FieldMapping
@@ -217,6 +250,127 @@ const validateRelatedSummaries = (field: HierarchyFieldMapping): string => {
   return ''
 }
 
+const validateRelatedBreakdownGroupFields = (groupBy: RelatedBreakdownGroupField[] | undefined, context: string): string => {
+  if (!Array.isArray(groupBy) || groupBy.length < 1)
+  {
+    return `${context} must include at least one groupBy entry.`
+  }
+
+  for (const groupField of groupBy)
+  {
+    if (!groupField || !hasText(groupField.fieldName) || !hasText(groupField.label))
+    {
+      return `${context} groupBy entries must include fieldName and label.`
+    }
+
+    if (!hasValidFormat(groupField.format))
+    {
+      return `${context} groupBy entry ${groupField.fieldName} has unsupported format.`
+    }
+  }
+
+  return ''
+}
+
+const validateRelatedBreakdowns = (field: HierarchyFieldMapping): string => {
+  if (field.relatedBreakdowns === undefined || field.relatedBreakdowns === null)
+  {
+    return ''
+  }
+
+  if (!Array.isArray(field.relatedBreakdowns))
+  {
+    return `relatedBreakdowns for hierarchy field ${field.key} must be an array.`
+  }
+
+  const breakdownKeys = field.relatedBreakdowns.map((breakdown) => breakdown.key)
+  const uniqueBreakdownKeys = new Set(breakdownKeys)
+
+  if (uniqueBreakdownKeys.size !== breakdownKeys.length)
+  {
+    return `relatedBreakdowns keys for hierarchy field ${field.key} must be unique.`
+  }
+
+  for (const breakdown of field.relatedBreakdowns)
+  {
+    if (!breakdown || !hasText(breakdown.key) || !hasText(breakdown.label))
+    {
+      return `Each relatedBreakdowns entry for hierarchy field ${field.key} must include key and label.`
+    }
+
+    if (!hasText(breakdown.relatedSourceKey))
+    {
+      return `relatedBreakdowns entry ${breakdown.key} must include relatedSourceKey.`
+    }
+
+    if (!hasText(breakdown.joinField))
+    {
+      return `relatedBreakdowns entry ${breakdown.key} must include joinField.`
+    }
+
+    if (!hasText(breakdown.relatedJoinField))
+    {
+      return `relatedBreakdowns entry ${breakdown.key} must include relatedJoinField.`
+    }
+
+    const groupValidationError = validateRelatedBreakdownGroupFields(breakdown.groupBy, `relatedBreakdowns entry ${breakdown.key}`)
+
+    if (groupValidationError !== '')
+    {
+      return groupValidationError
+    }
+
+    if (!hasText(breakdown.sumField))
+    {
+      return `relatedBreakdowns entry ${breakdown.key} must include sumField.`
+    }
+
+    if (!hasValidFormat(breakdown.format))
+    {
+      return `relatedBreakdowns entry ${breakdown.key} has unsupported format.`
+    }
+
+    if (breakdown.children !== undefined && breakdown.children !== null)
+    {
+      if (!Array.isArray(breakdown.children))
+      {
+        return `relatedBreakdowns entry ${breakdown.key} children must be an array.`
+      }
+
+      const childKeys = breakdown.children.map((child) => child.key)
+      const uniqueChildKeys = new Set(childKeys)
+
+      if (uniqueChildKeys.size !== childKeys.length)
+      {
+        return `relatedBreakdowns entry ${breakdown.key} children keys must be unique.`
+      }
+
+      for (const child of breakdown.children)
+      {
+        if (!child || !hasText(child.key) || !hasText(child.label))
+        {
+          return `Each child entry for relatedBreakdowns entry ${breakdown.key} must include key and label.`
+        }
+
+        const childGroupValidationError = validateRelatedBreakdownGroupFields(child.groupBy, `relatedBreakdowns child entry ${child.key}`)
+
+        if (childGroupValidationError !== '')
+        {
+          return childGroupValidationError
+        }
+
+        if (!hasValidFormat(child.format))
+        {
+          return `relatedBreakdowns child entry ${child.key} has unsupported format.`
+        }
+      }
+    }
+  }
+
+  return ''
+}
+
+
 const validateFeatureAttributes = (featureAttributes: FeatureAttributeConfig[] | undefined): string => {
   if (!featureAttributes)
   {
@@ -356,6 +510,17 @@ export const parseStructureFieldMap = (fieldMapJson: string | undefined): FieldM
           errorMessage: relatedSummaryValidationError
         }
       }
+
+
+      const relatedBreakdownValidationError = validateRelatedBreakdowns(hierarchyField)
+
+      if (relatedBreakdownValidationError !== '')
+      {
+        return {
+          fieldMap: null,
+          errorMessage: relatedBreakdownValidationError
+        }
+      }
     }
 
     if (!hasText(parsedValue.featureLabelFieldKey))
@@ -438,8 +603,9 @@ export const getConfiguredFieldNamesFromFieldMap = (fieldMap: StructureFieldMap)
     const hierarchyFieldNames = [field.fieldName]
     const appendFieldNames = (field.appendFields || []).map((appendField) => appendField.fieldName)
     const relatedSummaryJoinFieldNames = (field.relatedSummaries || []).map((summary) => summary.joinField)
+    const relatedBreakdownJoinFieldNames = (field.relatedBreakdowns || []).map((breakdown) => breakdown.joinField)
 
-    return [...hierarchyFieldNames, ...appendFieldNames, ...relatedSummaryJoinFieldNames]
+    return [...hierarchyFieldNames, ...appendFieldNames, ...relatedSummaryJoinFieldNames, ...relatedBreakdownJoinFieldNames]
   })
 
   fieldNames.push(fieldMap.identityFields.feature_uid.fieldName)

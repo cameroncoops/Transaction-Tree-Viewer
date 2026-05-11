@@ -11,6 +11,8 @@ import {
   parseStructureFieldMap,
   validateFieldMapAgainstAvailableFields,
   type FeatureAttributeConfig,
+  type RelatedBreakdownConfig,
+  type RelatedBreakdownGroupField,
   type RelatedSummaryConfig,
   type StructureFieldMap,
 } from './lib/field-map'
@@ -18,6 +20,7 @@ import {
   buildStructureHierarchyFromRecords,
   getExpandableNodeKeys,
   getNodePathKeysForFeatureUid,
+  type RelatedBreakdownNodesByFeatureUid,
   type RelatedSummaryValuesByFeatureUid,
   type StructureNode,
 } from './lib/structure-model'
@@ -48,6 +51,7 @@ import StructureTree from './components/StructureTree'
 const { useEffect, useRef, useState } = React
 
 const ACTIVE_FEATURE_DS_PAGE_SIZE = 2000
+const RELATED_QUERY_PAGE_SIZE = 2000
 const ACCENT_COLOR = '#007ac2'
 
 const PAGE_STYLE = {
@@ -260,6 +264,10 @@ interface RelatedSummaryDefinition extends RelatedSummaryConfig {
   hierarchyFieldKey: string
 }
 
+interface RelatedBreakdownDefinition extends RelatedBreakdownConfig {
+  hierarchyFieldKey: string
+}
+
 interface ViewEventHandle {
   remove: () => void
 }
@@ -283,16 +291,35 @@ const getRelatedSummaryDefinitions = (fieldMap: StructureFieldMap): RelatedSumma
   })
 }
 
+
+const getRelatedBreakdownDefinitions = (fieldMap: StructureFieldMap): RelatedBreakdownDefinition[] => {
+  return fieldMap.hierarchyFields.flatMap((hierarchyField) => {
+    const relatedBreakdowns = Array.isArray(hierarchyField.relatedBreakdowns)
+      ? hierarchyField.relatedBreakdowns
+      : []
+
+    return relatedBreakdowns.map((breakdown) => {
+      return {
+        ...breakdown,
+        hierarchyFieldKey: hierarchyField.key,
+      }
+    })
+  })
+}
+
 const getRelatedSourceKeysFromFieldMap = (fieldMap: StructureFieldMap | null): string[] => {
   if (!fieldMap) {
     return []
   }
 
-  const keys = getRelatedSummaryDefinitions(fieldMap).map((summary) => {
+  const summaryKeys = getRelatedSummaryDefinitions(fieldMap).map((summary) => {
     return summary.relatedSourceKey
   })
+  const breakdownKeys = getRelatedBreakdownDefinitions(fieldMap).map((breakdown) => {
+    return breakdown.relatedSourceKey
+  })
 
-  return Array.from(new Set(keys))
+  return Array.from(new Set([...summaryKeys, ...breakdownKeys]))
 }
 
 const getFeatureUidsFromNodes = (nodes: StructureNode[]): string[] => {
@@ -432,6 +459,25 @@ const getQueryRecords = (queryResult: any): any[] => {
   return []
 }
 
+const queryRelatedRecords = async (
+  relatedDataSource: any,
+  query: any,
+): Promise<any[]> => {
+  const queryResult = await relatedDataSource.query({
+    ...query,
+    pageSize: Math.max(
+      Number(query?.pageSize) || 0,
+      RELATED_QUERY_PAGE_SIZE,
+    ),
+    resultRecordCount: Math.max(
+      Number(query?.resultRecordCount) || 0,
+      RELATED_QUERY_PAGE_SIZE,
+    ),
+  })
+
+  return getQueryRecords(queryResult)
+}
+
 const buildTextInClause = (fieldName: string, values: string[]): string => {
   const cleanValues = values
     .map((value) => String(value || '').trim())
@@ -446,6 +492,10 @@ const buildTextInClause = (fieldName: string, values: string[]): string => {
   })
 
   return `${fieldName} IN (${escapedValues.join(', ')})`
+}
+
+const buildNonZeroRelatedWhereClause = (baseWhere: string, fieldName: string): string => {
+  return `(${baseWhere}) AND ${fieldName} <> 0`
 }
 
 const chunkValues = (values: string[], chunkSize: number): string[][] => {
@@ -519,11 +569,9 @@ const queryRelatedSummaryValuesByFeatureUid = async (
             outStatisticFieldName: statisticFieldName,
           },
         ],
-        pageSize: joinValueChunk.length,
       }
 
-      const queryResult = await (relatedDataSource as any).query(query)
-      const relatedRecords = getQueryRecords(queryResult)
+      const relatedRecords = await queryRelatedRecords(relatedDataSource, query)
 
       relatedRecords.forEach((relatedRecord) => {
         const relatedJoinValue = getRecordFilterValue(
@@ -560,6 +608,491 @@ const queryRelatedSummaryValuesByFeatureUid = async (
   }
 
   return summaryValuesByFeatureUid
+}
+
+
+const getRelatedGroupFieldValue = (record: any, groupField: RelatedBreakdownGroupField): string => {
+  const value = getRecordRawValue(record, groupField.fieldName)
+
+  if (value === null || value === undefined)
+  {
+    return ''
+  }
+
+  return String(value).trim()
+}
+
+const getRelatedGroupKey = (record: any, groupBy: RelatedBreakdownGroupField[]): string => {
+  return groupBy.map((groupField) => {
+    return `${groupField.fieldName}=${getRelatedGroupFieldValue(record, groupField)}`
+  }).join('|||')
+}
+
+const getRelatedGroupDisplayValue = (record: any, groupBy: RelatedBreakdownGroupField[]): string => {
+  return groupBy.map((groupField) => {
+    return getRelatedGroupFieldValue(record, groupField)
+  }).filter((value) => {
+    return value !== ''
+  }).join(' / ')
+}
+
+const getNumberValue = (value: unknown): number => {
+  const numericValue = typeof value === 'number' ? value : Number(value)
+
+  return Number.isNaN(numericValue) ? 0 : numericValue
+}
+
+const getBreakdownOutFields = (breakdown: RelatedBreakdownDefinition): string[] => {
+  const fieldNames = new Set<string>()
+
+  fieldNames.add(breakdown.relatedJoinField)
+  fieldNames.add(breakdown.sumField)
+
+  breakdown.groupBy.forEach((groupField) => {
+    fieldNames.add(groupField.fieldName)
+  })
+
+  ;(breakdown.children || []).forEach((child) => {
+    if (child.sumField)
+    {
+      fieldNames.add(child.sumField)
+    }
+
+    child.groupBy.forEach((groupField) => {
+      fieldNames.add(groupField.fieldName)
+    })
+  })
+
+  return Array.from(fieldNames)
+}
+
+const makeRelatedBreakdownNode = (
+  featureUid: string,
+  breakdownKey: string,
+  nodeKeyPart: string,
+  label: string,
+  value: string,
+  sumField: string,
+  sumLabel: string,
+  sumValue: number,
+  format: any,
+  children: StructureNode[]
+): StructureNode => {
+  return {
+    nodeKey: `related|||feature_uid=${featureUid}|||${breakdownKey}|||${nodeKeyPart}`,
+    fieldKey: `related:${breakdownKey}`,
+    fieldName: '',
+    label,
+    value,
+    depth: 0,
+    children,
+    appendedDisplayValues: [
+      {
+        key: 'count',
+        fieldName: sumField,
+        label: sumLabel,
+        value: sumValue,
+        format: format || 'number',
+      },
+    ],
+  }
+}
+
+const formatRelatedCount = (value: number): string => {
+  return value.toLocaleString('en-AU')
+}
+
+const formatCostUnitDisplay = (value: string): string => {
+  const parts = String(value || '').split('/').map((part) => {
+    return part.trim()
+  }).filter((part) => {
+    return part !== ''
+  })
+
+  if (parts.length === 0)
+  {
+    return ''
+  }
+
+  if (parts.length === 1)
+  {
+    return `$${parts[0]}`
+  }
+
+  return `$${parts[0]} ${parts.slice(1).join(' ')}`
+}
+
+const makeRelatedDisplayNode = (
+  featureUid: string,
+  breakdownKey: string,
+  nodeKeyPart: string,
+  value: string,
+  children: StructureNode[]
+): StructureNode => {
+  return {
+    nodeKey: `related|||feature_uid=${featureUid}|||${breakdownKey}|||${nodeKeyPart}`,
+    fieldKey: `related:${breakdownKey}`,
+    fieldName: '',
+    label: '',
+    value,
+    depth: 0,
+    children,
+    appendedDisplayValues: [],
+  }
+}
+
+const queryRelatedBreakdownNodesByFeatureUid = async (
+  mainRecords: any[],
+  fieldMap: StructureFieldMap,
+  relatedDataSourceByKey: RelatedDataSourceRuntimeMap,
+): Promise<RelatedBreakdownNodesByFeatureUid> => {
+  const breakdownDefinitions = getRelatedBreakdownDefinitions(fieldMap)
+  const breakdownNodesByFeatureUid: RelatedBreakdownNodesByFeatureUid = {}
+
+  if (breakdownDefinitions.length === 0)
+  {
+    return breakdownNodesByFeatureUid
+  }
+
+  for (const breakdown of breakdownDefinitions)
+  {
+    const relatedDataSource = relatedDataSourceByKey[breakdown.relatedSourceKey]
+
+    if (!relatedDataSource || typeof (relatedDataSource as any).query !== 'function')
+    {
+      continue
+    }
+
+    const joinValueToFeatureUids: { [joinValue: string]: string[] } = {}
+
+    mainRecords.forEach((record) => {
+      const featureUid = getRecordFilterValue(
+        record,
+        fieldMap.identityFields.feature_uid.fieldName,
+      )
+      const joinValue = getRecordFilterValue(record, breakdown.joinField)
+
+      if (featureUid === '' || joinValue === '')
+      {
+        return
+      }
+
+      if (!joinValueToFeatureUids[joinValue])
+      {
+        joinValueToFeatureUids[joinValue] = []
+      }
+
+      if (!joinValueToFeatureUids[joinValue].includes(featureUid))
+      {
+        joinValueToFeatureUids[joinValue].push(featureUid)
+      }
+    })
+
+    const joinValues = Object.keys(joinValueToFeatureUids)
+
+    if (joinValues.length === 0)
+    {
+      continue
+    }
+
+    const parentStatisticFieldName = `${breakdown.key}_sum`
+    const parentGroupFieldNames = breakdown.groupBy.map((groupField) => {
+      return groupField.fieldName
+    })
+
+    const firstChild = breakdown.children && breakdown.children.length > 0
+      ? breakdown.children[0]
+      : null
+
+    const childStatisticFieldName = firstChild
+      ? `${firstChild.key}_sum`
+      : ''
+
+    const childGroupFieldNames = firstChild
+      ? firstChild.groupBy.map((groupField) => {
+        return groupField.fieldName
+      })
+      : []
+
+    const featureUidAggregates: {
+      [featureUid: string]: {
+        [parentGroupKey: string]: {
+          label: string
+          value: string
+          sum: number
+          children: {
+            [childNodeKey: string]: {
+              breakdownKey: string
+              label: string
+              value: string
+              sumField: string
+              sumLabel: string
+              format: any
+              sum: number
+            }
+          }
+        }
+      }
+    } = {}
+
+    for (const joinValueChunk of chunkValues(joinValues, 75))
+    {
+      const parentQuery = {
+        where: buildNonZeroRelatedWhereClause(buildTextInClause(breakdown.relatedJoinField, joinValueChunk), breakdown.sumField),
+        outFields: [breakdown.relatedJoinField, ...parentGroupFieldNames],
+        returnGeometry: false,
+        groupByFieldsForStatistics: [
+          breakdown.relatedJoinField,
+          ...parentGroupFieldNames,
+        ],
+        outStatistics: [
+          {
+            statisticType: 'sum',
+            onStatisticField: breakdown.sumField,
+            outStatisticFieldName: parentStatisticFieldName,
+          },
+        ],
+      }
+
+      console.log(
+        '[TransactionDataSetTreeExplorer] stock parent query',
+        {
+          relatedSourceKey: breakdown.relatedSourceKey,
+          joinField: breakdown.joinField,
+          relatedJoinField: breakdown.relatedJoinField,
+          gardenUidValues: joinValueChunk,
+          where: parentQuery.where,
+        },
+      )
+
+      const parentRecords = await queryRelatedRecords(relatedDataSource, parentQuery)
+
+      console.log(
+        '[TransactionDataSetTreeExplorer] stock parent query result',
+        {
+          relatedSourceKey: breakdown.relatedSourceKey,
+          gardenUidValues: joinValueChunk,
+          recordCount: parentRecords.length,
+        },
+      )
+
+      parentRecords.forEach((relatedRecord) => {
+        const relatedJoinValue = getRecordFilterValue(
+          relatedRecord,
+          breakdown.relatedJoinField,
+        )
+        const matchingFeatureUids = joinValueToFeatureUids[relatedJoinValue] || []
+
+        if (matchingFeatureUids.length === 0)
+        {
+          return
+        }
+
+        const parentGroupKey = getRelatedGroupKey(relatedRecord, breakdown.groupBy)
+        const parentGroupValue = getRelatedGroupDisplayValue(relatedRecord, breakdown.groupBy)
+        const parentSumValue = getNumberValue(getRecordRawValue(relatedRecord, parentStatisticFieldName))
+
+        if (parentSumValue === 0)
+        {
+          return
+        }
+
+        if (parentGroupKey === '' || parentGroupValue === '')
+        {
+          return
+        }
+
+        matchingFeatureUids.forEach((featureUid) => {
+          if (!featureUidAggregates[featureUid])
+          {
+            featureUidAggregates[featureUid] = {}
+          }
+
+          if (!featureUidAggregates[featureUid][parentGroupKey])
+          {
+            featureUidAggregates[featureUid][parentGroupKey] = {
+              label: breakdown.label,
+              value: parentGroupValue,
+              sum: 0,
+              children: {},
+            }
+          }
+
+          featureUidAggregates[featureUid][parentGroupKey].sum += parentSumValue
+        })
+      })
+
+      if (firstChild)
+      {
+        const childQuery = {
+          where: buildNonZeroRelatedWhereClause(buildTextInClause(breakdown.relatedJoinField, joinValueChunk), firstChild.sumField || breakdown.sumField),
+          outFields: [
+            breakdown.relatedJoinField,
+            ...parentGroupFieldNames,
+            ...childGroupFieldNames,
+          ],
+          returnGeometry: false,
+          groupByFieldsForStatistics: [
+            breakdown.relatedJoinField,
+            ...parentGroupFieldNames,
+            ...childGroupFieldNames,
+          ],
+          outStatistics: [
+            {
+              statisticType: 'sum',
+              onStatisticField: firstChild.sumField || breakdown.sumField,
+              outStatisticFieldName: childStatisticFieldName,
+            },
+          ],
+        }
+
+        console.log(
+          '[TransactionDataSetTreeExplorer] stock child query',
+          {
+            relatedSourceKey: breakdown.relatedSourceKey,
+            joinField: breakdown.joinField,
+            relatedJoinField: breakdown.relatedJoinField,
+            gardenUidValues: joinValueChunk,
+            where: childQuery.where,
+          },
+        )
+
+        const childRecords = await queryRelatedRecords(relatedDataSource, childQuery)
+
+        console.log(
+          '[TransactionDataSetTreeExplorer] stock child query result',
+          {
+            relatedSourceKey: breakdown.relatedSourceKey,
+            gardenUidValues: joinValueChunk,
+            recordCount: childRecords.length,
+          },
+        )
+
+        childRecords.forEach((relatedRecord) => {
+          const relatedJoinValue = getRecordFilterValue(
+            relatedRecord,
+            breakdown.relatedJoinField,
+          )
+          const matchingFeatureUids = joinValueToFeatureUids[relatedJoinValue] || []
+
+          if (matchingFeatureUids.length === 0)
+          {
+            return
+          }
+
+          const parentGroupKey = getRelatedGroupKey(relatedRecord, breakdown.groupBy)
+          const parentGroupValue = getRelatedGroupDisplayValue(relatedRecord, breakdown.groupBy)
+          const childGroupKey = getRelatedGroupKey(relatedRecord, firstChild.groupBy)
+          const childGroupValue = getRelatedGroupDisplayValue(relatedRecord, firstChild.groupBy)
+          const childSumField = firstChild.sumField || breakdown.sumField
+          const childSumValue = getNumberValue(getRecordRawValue(relatedRecord, childStatisticFieldName))
+
+          if (childSumValue === 0)
+          {
+            return
+          }
+
+          if (
+            parentGroupKey === '' ||
+            parentGroupValue === '' ||
+            childGroupKey === '' ||
+            childGroupValue === ''
+          )
+          {
+            return
+          }
+
+          matchingFeatureUids.forEach((featureUid) => {
+            if (!featureUidAggregates[featureUid])
+            {
+              featureUidAggregates[featureUid] = {}
+            }
+
+            if (!featureUidAggregates[featureUid][parentGroupKey])
+            {
+              featureUidAggregates[featureUid][parentGroupKey] = {
+                label: breakdown.label,
+                value: parentGroupValue,
+                sum: 0,
+                children: {},
+              }
+            }
+
+            if (!featureUidAggregates[featureUid][parentGroupKey].children[childGroupKey])
+            {
+              featureUidAggregates[featureUid][parentGroupKey].children[childGroupKey] = {
+                breakdownKey: firstChild.key,
+                label: firstChild.label,
+                value: childGroupValue,
+                sumField: childSumField,
+                sumLabel: firstChild.sumLabel || breakdown.sumLabel || 'Count',
+                format: firstChild.format || breakdown.format || 'number',
+                sum: 0,
+              }
+            }
+
+            featureUidAggregates[featureUid][parentGroupKey].children[childGroupKey].sum += childSumValue
+          })
+        })
+      }
+    }
+
+    Object.keys(featureUidAggregates).forEach((featureUid) => {
+      if (!breakdownNodesByFeatureUid[featureUid])
+      {
+        breakdownNodesByFeatureUid[featureUid] = []
+      }
+
+      Object.keys(featureUidAggregates[featureUid]).sort((first, second) => {
+        return featureUidAggregates[featureUid][first].value.localeCompare(
+          featureUidAggregates[featureUid][second].value,
+          undefined,
+          { numeric: true, sensitivity: 'base' },
+        )
+      }).forEach((parentGroupKey) => {
+        const parentAggregate = featureUidAggregates[featureUid][parentGroupKey]
+        const childNodes = Object.keys(parentAggregate.children).sort((first, second) => {
+          return parentAggregate.children[first].value.localeCompare(
+            parentAggregate.children[second].value,
+            undefined,
+            { numeric: true, sensitivity: 'base' },
+          )
+        }).map((childGroupKey) => {
+          const childAggregate = parentAggregate.children[childGroupKey]
+          const costUnitDisplay = formatCostUnitDisplay(childAggregate.value)
+          const childValue = `${formatRelatedCount(childAggregate.sum)} x ${parentAggregate.value}${costUnitDisplay !== '' ? ` - ${costUnitDisplay}` : ''}`
+
+          return makeRelatedDisplayNode(
+            featureUid,
+            childAggregate.breakdownKey,
+            `${parentGroupKey}|||${childGroupKey}`,
+            childValue,
+            [],
+          )
+        })
+
+        const parentTotal = childNodes.reduce((total, childNode) => {
+          const countText = String(childNode.value || '').split(' x ')[0]
+          const countValue = Number(countText.replace(/,/g, ''))
+
+          return Number.isNaN(countValue) ? total : total + countValue
+        }, 0)
+        const parentValue = `${formatRelatedCount(parentTotal || parentAggregate.sum)} x ${parentAggregate.value}`
+
+        breakdownNodesByFeatureUid[featureUid].push(
+          makeRelatedDisplayNode(
+            featureUid,
+            breakdown.key,
+            parentGroupKey,
+            parentValue,
+            childNodes,
+          ),
+        )
+      })
+    })
+  }
+
+  return breakdownNodesByFeatureUid
 }
 
 const getFilterOptionsFromRecords = (
@@ -635,6 +1168,12 @@ const Widget = (props: AllWidgetProps<Config>) => {
   const [relatedDataSourceByKey, setRelatedDataSourceByKey] =
     useState<RelatedDataSourceRuntimeMap>({})
   const [relatedDataSourceError, setRelatedDataSourceError] = useState('')
+  const [relatedBreakdownNodesByFeatureUid, setRelatedBreakdownNodesByFeatureUid] =
+    useState<RelatedBreakdownNodesByFeatureUid>({})
+  const [loadingRelatedBreakdownFeatureUids, setLoadingRelatedBreakdownFeatureUids] =
+    useState<{ [feature_uid: string]: boolean }>({})
+  const [relatedBreakdownErrorsByFeatureUid, setRelatedBreakdownErrorsByFeatureUid] =
+    useState<{ [feature_uid: string]: string }>({})
   const [jimuMapView, setJimuMapView] = useState<JimuMapView | null>(null)
   const [isLoadingFeatures, setIsLoadingFeatures] = useState(false)
   const [loadError, setLoadError] = useState('')
@@ -831,6 +1370,102 @@ const Widget = (props: AllWidgetProps<Config>) => {
 
       return Array.from(mergedKeys)
     })
+  }
+
+
+  const loadRelatedBreakdownsForFeatureNode = async (node: StructureNode) => {
+    const featureUid = String(node.feature_uid || '').trim()
+
+    if (!activeFeatureDs || !structureFieldMap || featureUid === '') {
+      return
+    }
+
+    if (relatedBreakdownNodesByFeatureUid[featureUid] || loadingRelatedBreakdownFeatureUids[featureUid]) {
+      return
+    }
+
+    const records = getLoadedRecordsFromDataSource(activeFeatureDs)
+    const matchingRecord = records.find((record) => {
+      return getRecordFilterValue(record, structureFieldMap.identityFields.feature_uid.fieldName) === featureUid
+    })
+
+    if (!matchingRecord) {
+      return
+    }
+
+    const queriedGardenUid = getRecordFilterValue(
+      matchingRecord,
+      structureFieldMap.hierarchyFields.find((field) => {
+        return (field.relatedBreakdowns || []).length > 0
+      })?.relatedBreakdowns?.[0]?.joinField || '',
+    )
+
+    console.log(
+      '[TransactionDataSetTreeExplorer] lazy-load stock breakdown start',
+      {
+        featureUid,
+        gardenUid: queriedGardenUid,
+      },
+    )
+
+    setLoadingRelatedBreakdownFeatureUids((previous) => {
+      return {
+        ...previous,
+        [featureUid]: true,
+      }
+    })
+    setRelatedBreakdownErrorsByFeatureUid((previous) => {
+      const next = { ...previous }
+      delete next[featureUid]
+      return next
+    })
+
+    try {
+      const breakdownNodesByFeatureUid = await queryRelatedBreakdownNodesByFeatureUid(
+        [matchingRecord],
+        structureFieldMap,
+        relatedDataSourceByKey,
+      )
+
+      setRelatedBreakdownNodesByFeatureUid((previous) => {
+        return {
+          ...previous,
+          [featureUid]: breakdownNodesByFeatureUid[featureUid] || [],
+        }
+      })
+
+      console.log(
+        '[TransactionDataSetTreeExplorer] lazy-load stock breakdown complete',
+        {
+          featureUid,
+          gardenUid: queriedGardenUid,
+          renderedRowCount: (breakdownNodesByFeatureUid[featureUid] || []).length,
+        },
+      )
+    } catch (error) {
+      console.warn(
+        '[TransactionDataSetTreeExplorer] lazy-load stock breakdown failed',
+        {
+          featureUid,
+          gardenUid: queriedGardenUid,
+          error,
+        },
+      )
+      setRelatedBreakdownErrorsByFeatureUid((previous) => {
+        return {
+          ...previous,
+          [featureUid]: error instanceof Error
+            ? error.message
+            : 'Failed to load plant breakdown lines.',
+        }
+      })
+    } finally {
+      setLoadingRelatedBreakdownFeatureUids((previous) => {
+        const next = { ...previous }
+        delete next[featureUid]
+        return next
+      })
+    }
   }
 
   const toggleNode = (nodeKey: string) => {
@@ -1602,6 +2237,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
           setStructureHierarchy([])
           setRelatedDataSourceByKey({})
           setRelatedDataSourceError('')
+          setRelatedBreakdownNodesByFeatureUid({})
+          setLoadingRelatedBreakdownFeatureUids({})
+          setRelatedBreakdownErrorsByFeatureUid({})
           setIsolatedTopLevelValues([])
           setSelectedFilterValues({})
           setFilterSearchValues({})
@@ -1836,9 +2474,13 @@ const Widget = (props: AllWidgetProps<Config>) => {
                 loadingFeatureAttributeKeys={loadingFeatureAttributeKeys}
                 featureAttributeRecords={featureAttributeRecords}
                 featureAttributeErrors={featureAttributeErrors}
+                relatedBreakdownNodesByFeatureUid={relatedBreakdownNodesByFeatureUid}
+                loadingRelatedBreakdownFeatureUids={loadingRelatedBreakdownFeatureUids}
+                relatedBreakdownErrorsByFeatureUid={relatedBreakdownErrorsByFeatureUid}
                 isolatedTopLevelValues={isolatedTopLevelValues}
                 onToggleTopLevelIsolation={toggleTopLevelIsolation}
                 onToggleNode={toggleNode}
+                onFeatureNodeExpanded={loadRelatedBreakdownsForFeatureNode}
                 onExpandAll={expandAll}
                 onCollapseAll={collapseAll}
                 onFeatureClick={handleFeatureClick}

@@ -17,6 +17,11 @@ export interface RelatedSummaryValuesByFeatureUid
   }
 }
 
+export interface RelatedBreakdownNodesByFeatureUid
+{
+  [feature_uid: string]: StructureNode[]
+}
+
 export interface StructureNode
 {
   nodeKey: string
