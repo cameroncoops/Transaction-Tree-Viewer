@@ -50,6 +50,15 @@ export interface RelatedBreakdownConfig
   relatedSourceKey: string
   joinField: string
   relatedJoinField: string
+  filter?: boolean
+  filterType?: 'direct' | 'resolved'
+  filterOptionsSourceKey?: string
+  filterDisplayField?: string
+  filterValueField?: string
+  filterResolveSourceKey?: string
+  filterResolveValueField?: string
+  filterResolveJoinField?: string
+  targetField?: string
   groupBy: RelatedBreakdownGroupField[]
   sumField: string
   sumLabel?: string
@@ -311,6 +320,127 @@ const validateRelatedBreakdowns = (field: HierarchyFieldMapping): string => {
     if (!hasText(breakdown.relatedJoinField))
     {
       return `relatedBreakdowns entry ${breakdown.key} must include relatedJoinField.`
+    }
+
+    const filterValidationError = validateFilterFlag(
+      breakdown.filter,
+      `relatedBreakdowns entry ${breakdown.key}`,
+    )
+
+    if (filterValidationError !== '')
+    {
+      return filterValidationError
+    }
+
+    if (
+      breakdown.filterDisplayField !== undefined &&
+      breakdown.filterDisplayField !== null &&
+      !hasText(breakdown.filterDisplayField)
+    )
+    {
+      return `relatedBreakdowns entry ${breakdown.key} filterDisplayField must be a non-empty string when supplied.`
+    }
+
+    if (
+      breakdown.filterValueField !== undefined &&
+      breakdown.filterValueField !== null &&
+      !hasText(breakdown.filterValueField)
+    )
+    {
+      return `relatedBreakdowns entry ${breakdown.key} filterValueField must be a non-empty string when supplied.`
+    }
+
+    if (
+      breakdown.filterType !== undefined &&
+      breakdown.filterType !== null &&
+      breakdown.filterType !== 'direct' &&
+      breakdown.filterType !== 'resolved'
+    )
+    {
+      return `relatedBreakdowns entry ${breakdown.key} filterType must be direct or resolved when supplied.`
+    }
+
+    if (
+      breakdown.filterOptionsSourceKey !== undefined &&
+      breakdown.filterOptionsSourceKey !== null &&
+      !hasText(breakdown.filterOptionsSourceKey)
+    )
+    {
+      return `relatedBreakdowns entry ${breakdown.key} filterOptionsSourceKey must be a non-empty string when supplied.`
+    }
+
+    if (
+      breakdown.filterResolveSourceKey !== undefined &&
+      breakdown.filterResolveSourceKey !== null &&
+      !hasText(breakdown.filterResolveSourceKey)
+    )
+    {
+      return `relatedBreakdowns entry ${breakdown.key} filterResolveSourceKey must be a non-empty string when supplied.`
+    }
+
+    if (
+      breakdown.filterResolveValueField !== undefined &&
+      breakdown.filterResolveValueField !== null &&
+      !hasText(breakdown.filterResolveValueField)
+    )
+    {
+      return `relatedBreakdowns entry ${breakdown.key} filterResolveValueField must be a non-empty string when supplied.`
+    }
+
+    if (
+      breakdown.filterResolveJoinField !== undefined &&
+      breakdown.filterResolveJoinField !== null &&
+      !hasText(breakdown.filterResolveJoinField)
+    )
+    {
+      return `relatedBreakdowns entry ${breakdown.key} filterResolveJoinField must be a non-empty string when supplied.`
+    }
+
+    if (
+      breakdown.targetField !== undefined &&
+      breakdown.targetField !== null &&
+      !hasText(breakdown.targetField)
+    )
+    {
+      return `relatedBreakdowns entry ${breakdown.key} targetField must be a non-empty string when supplied.`
+    }
+
+    if (breakdown.filter === true && breakdown.filterType === 'resolved')
+    {
+      if (!hasText(breakdown.filterOptionsSourceKey))
+      {
+        return `relatedBreakdowns entry ${breakdown.key} filterOptionsSourceKey is required for resolved filters.`
+      }
+
+      if (!hasText(breakdown.filterDisplayField))
+      {
+        return `relatedBreakdowns entry ${breakdown.key} filterDisplayField is required for resolved filters.`
+      }
+
+      if (!hasText(breakdown.filterValueField))
+      {
+        return `relatedBreakdowns entry ${breakdown.key} filterValueField is required for resolved filters.`
+      }
+
+      if (!hasText(breakdown.filterResolveSourceKey))
+      {
+        return `relatedBreakdowns entry ${breakdown.key} filterResolveSourceKey is required for resolved filters.`
+      }
+
+      if (!hasText(breakdown.filterResolveValueField))
+      {
+        return `relatedBreakdowns entry ${breakdown.key} filterResolveValueField is required for resolved filters.`
+      }
+
+      if (!hasText(breakdown.filterResolveJoinField))
+      {
+        return `relatedBreakdowns entry ${breakdown.key} filterResolveJoinField is required for resolved filters.`
+      }
+
+      if (!hasText(breakdown.targetField))
+      {
+        return `relatedBreakdowns entry ${breakdown.key} targetField is required for resolved filters.`
+      }
     }
 
     const groupValidationError = validateRelatedBreakdownGroupFields(breakdown.groupBy, `relatedBreakdowns entry ${breakdown.key}`)
@@ -603,7 +733,13 @@ export const getConfiguredFieldNamesFromFieldMap = (fieldMap: StructureFieldMap)
     const hierarchyFieldNames = [field.fieldName]
     const appendFieldNames = (field.appendFields || []).map((appendField) => appendField.fieldName)
     const relatedSummaryJoinFieldNames = (field.relatedSummaries || []).map((summary) => summary.joinField)
-    const relatedBreakdownJoinFieldNames = (field.relatedBreakdowns || []).map((breakdown) => breakdown.joinField)
+    const relatedBreakdownJoinFieldNames = (field.relatedBreakdowns || []).flatMap((breakdown) => {
+      const targetFieldName = hasText(breakdown.targetField)
+        ? [String(breakdown.targetField).trim()]
+        : []
+
+      return [breakdown.joinField, ...targetFieldName]
+    })
 
     return [...hierarchyFieldNames, ...appendFieldNames, ...relatedSummaryJoinFieldNames, ...relatedBreakdownJoinFieldNames]
   })
