@@ -1,33 +1,78 @@
-export interface FieldMapping {
+export type FieldValueFormat = 'text' | 'date' | 'datetime' | 'number'
+
+export interface FieldMapping
+{
   fieldName: string
   label: string
 }
 
-export interface HierarchyFieldMapping extends FieldMapping {
+export interface HierarchyAppendFieldMapping extends FieldMapping
+{
+  key: string
+  format?: FieldValueFormat
+  filter?: boolean
+}
+
+export interface RelatedSummaryConfig
+{
+  key: string
+  label: string
+  relatedSourceKey: string
+  joinField: string
+  relatedJoinField: string
+  operation: 'sum'
+  fieldName: string
+  format?: FieldValueFormat
+}
+
+export interface RelatedBreakdownGroupField
+{
+  key?: string
+  fieldName: string
+  label: string
+  format?: FieldValueFormat
+}
+
+export interface RelatedBreakdownChildConfig
+{
+  key: string
+  label: string
+  groupBy: RelatedBreakdownGroupField[]
+  sumField?: string
+  sumLabel?: string
+  format?: FieldValueFormat
+}
+
+export interface RelatedBreakdownConfig
+{
+  key: string
+  label: string
+  relatedSourceKey: string
+  joinField: string
+  relatedJoinField: string
+  groupBy: RelatedBreakdownGroupField[]
+  sumField: string
+  sumLabel?: string
+  format?: FieldValueFormat
+  children?: RelatedBreakdownChildConfig[]
+}
+
+export interface HierarchyFieldMapping extends FieldMapping
+{
   key: string
   optional?: boolean
   filter?: boolean
-  appendFields?: AppendFieldMapping[]
+  appendFields?: HierarchyAppendFieldMapping[]
+  relatedSummaries?: RelatedSummaryConfig[]
+  relatedBreakdowns?: RelatedBreakdownConfig[]
 }
 
-export interface FeatureAttributeDisplayField extends FieldMapping {
+export interface FeatureAttributeDisplayField extends FieldMapping
+{
 }
 
-export type AppendFieldFormat = 'text' | 'date' | 'datetime' | 'number'
-
-export interface AppendFieldMapping extends FieldMapping {
-  key: string
-  format?: AppendFieldFormat
-  filter?: boolean
-}
-
-export interface PlaceholderFilterConfig {
-  id: string
-  key: string
-  label: string
-}
-
-export interface FeatureAttributeConfig {
+export interface FeatureAttributeConfig
+{
   key: string
   label: string
   type: 'basicLinkedTable'
@@ -36,7 +81,8 @@ export interface FeatureAttributeConfig {
   displayFields: FeatureAttributeDisplayField[]
 }
 
-export interface StructureFieldMap {
+export interface StructureFieldMap
+{
   fieldMapVersion: number
   hierarchyFields: HierarchyFieldMapping[]
   featureLabelFieldKey: string
@@ -47,17 +93,21 @@ export interface StructureFieldMap {
   featureAttributes?: FeatureAttributeConfig[]
 }
 
-export interface FieldMapParseResult {
+export interface FieldMapParseResult
+{
   fieldMap: StructureFieldMap | null
   errorMessage: string
 }
 
-export interface FieldValidationResult {
+export interface FieldValidationResult
+{
   configuredFieldNames: string[]
   availableFieldNames: string[]
   missingFieldNames: string[]
   isValid: boolean
 }
+
+const SUPPORTED_FORMATS = ['text', 'date', 'datetime', 'number']
 
 const hasText = (value: unknown): boolean => {
   return typeof value === 'string' && value.trim() !== ''
@@ -68,75 +118,307 @@ const hasFieldName = (value: FieldMapping | undefined): boolean => {
 }
 
 const hasHierarchyField = (value: HierarchyFieldMapping | undefined): boolean => {
-  if (!value || !hasText(value.key) || !hasText(value.fieldName) || !hasText(value.label)) {
-    return false
-  }
-
-  if (value.filter !== undefined && typeof value.filter !== 'boolean') {
-    return false
-  }
-
-  return true
+  return !!value && hasText(value.key) && hasText(value.fieldName) && hasText(value.label)
 }
 
 const hasDisplayField = (value: FeatureAttributeDisplayField | undefined): boolean => {
   return !!value && hasText(value.fieldName) && hasText(value.label)
 }
 
-const hasAppendField = (value: AppendFieldMapping | undefined): boolean => {
-  if (!value || !hasText(value.key) || !hasText(value.fieldName) || !hasText(value.label)) {
-    return false
-  }
-
-  if (value.filter !== undefined && typeof value.filter !== 'boolean') {
-    return false
-  }
-
-  if (value.format === undefined) {
+const hasValidFormat = (format: unknown): boolean => {
+  if (format === undefined || format === null)
+  {
     return true
   }
 
-  return ['text', 'date', 'datetime', 'number'].includes(value.format)
+  return typeof format === 'string' && SUPPORTED_FORMATS.includes(format)
 }
 
-const validateFeatureAttributes = (featureAttributes: FeatureAttributeConfig[] | undefined): string => {
-  if (!featureAttributes) {
+const validateFilterFlag = (filter: unknown, context: string): string => {
+  if (filter === undefined || filter === null)
+  {
     return ''
   }
 
-  if (!Array.isArray(featureAttributes)) {
+  if (typeof filter !== 'boolean')
+  {
+    return `${context} filter must be a boolean when supplied.`
+  }
+
+  return ''
+}
+
+const validateAppendFields = (field: HierarchyFieldMapping): string => {
+  if (field.appendFields === undefined || field.appendFields === null)
+  {
+    return ''
+  }
+
+  if (!Array.isArray(field.appendFields))
+  {
+    return `appendFields for hierarchy field ${field.key} must be an array.`
+  }
+
+  const appendKeys = field.appendFields.map((appendField) => appendField.key)
+  const uniqueAppendKeys = new Set(appendKeys)
+
+  if (uniqueAppendKeys.size !== appendKeys.length)
+  {
+    return `appendFields keys for hierarchy field ${field.key} must be unique.`
+  }
+
+  for (const appendField of field.appendFields)
+  {
+    if (!appendField || !hasText(appendField.key) || !hasText(appendField.fieldName) || !hasText(appendField.label))
+    {
+      return `Each appendFields entry for hierarchy field ${field.key} must include key, fieldName, and label.`
+    }
+
+    if (!hasValidFormat(appendField.format))
+    {
+      return `appendFields entry ${appendField.key} has unsupported format.`
+    }
+
+    const filterValidationError = validateFilterFlag(appendField.filter, `appendFields entry ${appendField.key}`)
+
+    if (filterValidationError !== '')
+    {
+      return filterValidationError
+    }
+  }
+
+  return ''
+}
+
+const validateRelatedSummaries = (field: HierarchyFieldMapping): string => {
+  if (field.relatedSummaries === undefined || field.relatedSummaries === null)
+  {
+    return ''
+  }
+
+  if (!Array.isArray(field.relatedSummaries))
+  {
+    return `relatedSummaries for hierarchy field ${field.key} must be an array.`
+  }
+
+  const summaryKeys = field.relatedSummaries.map((summary) => summary.key)
+  const uniqueSummaryKeys = new Set(summaryKeys)
+
+  if (uniqueSummaryKeys.size !== summaryKeys.length)
+  {
+    return `relatedSummaries keys for hierarchy field ${field.key} must be unique.`
+  }
+
+  for (const summary of field.relatedSummaries)
+  {
+    if (!summary || !hasText(summary.key) || !hasText(summary.label))
+    {
+      return `Each relatedSummaries entry for hierarchy field ${field.key} must include key and label.`
+    }
+
+    if (!hasText(summary.relatedSourceKey))
+    {
+      return `relatedSummaries entry ${summary.key} must include relatedSourceKey.`
+    }
+
+    if (!hasText(summary.joinField))
+    {
+      return `relatedSummaries entry ${summary.key} must include joinField.`
+    }
+
+    if (!hasText(summary.relatedJoinField))
+    {
+      return `relatedSummaries entry ${summary.key} must include relatedJoinField.`
+    }
+
+    if (summary.operation !== 'sum')
+    {
+      return `Only relatedSummaries operation sum is currently supported.`
+    }
+
+    if (!hasText(summary.fieldName))
+    {
+      return `relatedSummaries entry ${summary.key} must include fieldName.`
+    }
+
+    if (!hasValidFormat(summary.format))
+    {
+      return `relatedSummaries entry ${summary.key} has unsupported format.`
+    }
+  }
+
+  return ''
+}
+
+const validateRelatedBreakdownGroupFields = (groupBy: RelatedBreakdownGroupField[] | undefined, context: string): string => {
+  if (!Array.isArray(groupBy) || groupBy.length < 1)
+  {
+    return `${context} must include at least one groupBy entry.`
+  }
+
+  for (const groupField of groupBy)
+  {
+    if (!groupField || !hasText(groupField.fieldName) || !hasText(groupField.label))
+    {
+      return `${context} groupBy entries must include fieldName and label.`
+    }
+
+    if (!hasValidFormat(groupField.format))
+    {
+      return `${context} groupBy entry ${groupField.fieldName} has unsupported format.`
+    }
+  }
+
+  return ''
+}
+
+const validateRelatedBreakdowns = (field: HierarchyFieldMapping): string => {
+  if (field.relatedBreakdowns === undefined || field.relatedBreakdowns === null)
+  {
+    return ''
+  }
+
+  if (!Array.isArray(field.relatedBreakdowns))
+  {
+    return `relatedBreakdowns for hierarchy field ${field.key} must be an array.`
+  }
+
+  const breakdownKeys = field.relatedBreakdowns.map((breakdown) => breakdown.key)
+  const uniqueBreakdownKeys = new Set(breakdownKeys)
+
+  if (uniqueBreakdownKeys.size !== breakdownKeys.length)
+  {
+    return `relatedBreakdowns keys for hierarchy field ${field.key} must be unique.`
+  }
+
+  for (const breakdown of field.relatedBreakdowns)
+  {
+    if (!breakdown || !hasText(breakdown.key) || !hasText(breakdown.label))
+    {
+      return `Each relatedBreakdowns entry for hierarchy field ${field.key} must include key and label.`
+    }
+
+    if (!hasText(breakdown.relatedSourceKey))
+    {
+      return `relatedBreakdowns entry ${breakdown.key} must include relatedSourceKey.`
+    }
+
+    if (!hasText(breakdown.joinField))
+    {
+      return `relatedBreakdowns entry ${breakdown.key} must include joinField.`
+    }
+
+    if (!hasText(breakdown.relatedJoinField))
+    {
+      return `relatedBreakdowns entry ${breakdown.key} must include relatedJoinField.`
+    }
+
+    const groupValidationError = validateRelatedBreakdownGroupFields(breakdown.groupBy, `relatedBreakdowns entry ${breakdown.key}`)
+
+    if (groupValidationError !== '')
+    {
+      return groupValidationError
+    }
+
+    if (!hasText(breakdown.sumField))
+    {
+      return `relatedBreakdowns entry ${breakdown.key} must include sumField.`
+    }
+
+    if (!hasValidFormat(breakdown.format))
+    {
+      return `relatedBreakdowns entry ${breakdown.key} has unsupported format.`
+    }
+
+    if (breakdown.children !== undefined && breakdown.children !== null)
+    {
+      if (!Array.isArray(breakdown.children))
+      {
+        return `relatedBreakdowns entry ${breakdown.key} children must be an array.`
+      }
+
+      const childKeys = breakdown.children.map((child) => child.key)
+      const uniqueChildKeys = new Set(childKeys)
+
+      if (uniqueChildKeys.size !== childKeys.length)
+      {
+        return `relatedBreakdowns entry ${breakdown.key} children keys must be unique.`
+      }
+
+      for (const child of breakdown.children)
+      {
+        if (!child || !hasText(child.key) || !hasText(child.label))
+        {
+          return `Each child entry for relatedBreakdowns entry ${breakdown.key} must include key and label.`
+        }
+
+        const childGroupValidationError = validateRelatedBreakdownGroupFields(child.groupBy, `relatedBreakdowns child entry ${child.key}`)
+
+        if (childGroupValidationError !== '')
+        {
+          return childGroupValidationError
+        }
+
+        if (!hasValidFormat(child.format))
+        {
+          return `relatedBreakdowns child entry ${child.key} has unsupported format.`
+        }
+      }
+    }
+  }
+
+  return ''
+}
+
+
+const validateFeatureAttributes = (featureAttributes: FeatureAttributeConfig[] | undefined): string => {
+  if (!featureAttributes)
+  {
+    return ''
+  }
+
+  if (!Array.isArray(featureAttributes))
+  {
     return 'featureAttributes must be an array.'
   }
 
   const featureAttributeKeys = featureAttributes.map((featureAttribute) => featureAttribute.key)
   const uniqueFeatureAttributeKeys = new Set(featureAttributeKeys)
 
-  if (uniqueFeatureAttributeKeys.size !== featureAttributeKeys.length) {
+  if (uniqueFeatureAttributeKeys.size !== featureAttributeKeys.length)
+  {
     return 'Each featureAttributes key must be unique.'
   }
 
-  for (const featureAttribute of featureAttributes) {
-    if (!hasText(featureAttribute.key)) {
+  for (const featureAttribute of featureAttributes)
+  {
+    if (!hasText(featureAttribute.key))
+    {
       return 'Each featureAttributes entry must include key.'
     }
 
-    if (!hasText(featureAttribute.label)) {
+    if (!hasText(featureAttribute.label))
+    {
       return 'Each featureAttributes entry must include label.'
     }
 
-    if (featureAttribute.type !== 'basicLinkedTable') {
+    if (featureAttribute.type !== 'basicLinkedTable')
+    {
       return 'Only featureAttributes type basicLinkedTable is currently supported.'
     }
 
-    if (!hasText(featureAttribute.dataSourceUrl)) {
+    if (!hasText(featureAttribute.dataSourceUrl))
+    {
       return 'Each featureAttributes entry must include dataSourceUrl.'
     }
 
-    if (!hasText(featureAttribute.featureUidFieldName)) {
+    if (!hasText(featureAttribute.featureUidFieldName))
+    {
       return 'Each featureAttributes entry must include featureUidFieldName.'
     }
 
-    if (!Array.isArray(featureAttribute.displayFields) || featureAttribute.displayFields.length < 1) {
+    if (!Array.isArray(featureAttribute.displayFields) || featureAttribute.displayFields.length < 1)
+    {
       return 'Each featureAttributes entry must include at least one displayFields entry.'
     }
 
@@ -144,7 +426,8 @@ const validateFeatureAttributes = (featureAttributes: FeatureAttributeConfig[] |
       return !hasDisplayField(displayField)
     })
 
-    if (invalidDisplayField) {
+    if (invalidDisplayField)
+    {
       return 'Each featureAttributes displayFields entry must include fieldName and label.'
     }
   }
@@ -153,17 +436,20 @@ const validateFeatureAttributes = (featureAttributes: FeatureAttributeConfig[] |
 }
 
 export const parseStructureFieldMap = (fieldMapJson: string | undefined): FieldMapParseResult => {
-  if (!fieldMapJson || fieldMapJson.trim() === '') {
+  if (!fieldMapJson || fieldMapJson.trim() === '')
+  {
     return {
       fieldMap: null,
       errorMessage: 'No field map JSON has been configured.'
     }
   }
 
-  try {
+  try
+  {
     const parsedValue = JSON.parse(fieldMapJson) as StructureFieldMap
 
-    if (!Array.isArray(parsedValue.hierarchyFields) || parsedValue.hierarchyFields.length < 1) {
+    if (!Array.isArray(parsedValue.hierarchyFields) || parsedValue.hierarchyFields.length < 1)
+    {
       return {
         fieldMap: null,
         errorMessage: 'Field map JSON must include at least one hierarchyFields entry.'
@@ -174,45 +460,71 @@ export const parseStructureFieldMap = (fieldMapJson: string | undefined): FieldM
       return !hasHierarchyField(field)
     })
 
-    if (invalidHierarchyField) {
+    if (invalidHierarchyField)
+    {
       return {
         fieldMap: null,
-        errorMessage: 'Each hierarchyFields entry must include key, fieldName, and label. If supplied, filter must be true or false.'
+        errorMessage: 'Each hierarchyFields entry must include key, fieldName, and label.'
       }
     }
 
     const hierarchyKeys = parsedValue.hierarchyFields.map((field) => field.key)
     const uniqueHierarchyKeys = new Set(hierarchyKeys)
 
-    if (uniqueHierarchyKeys.size !== hierarchyKeys.length) {
+    if (uniqueHierarchyKeys.size !== hierarchyKeys.length)
+    {
       return {
         fieldMap: null,
         errorMessage: 'Each hierarchyFields key must be unique.'
       }
     }
 
-    const invalidAppendField = parsedValue.hierarchyFields.find((field) => {
-      if (!field.appendFields) {
-        return false
+    for (const hierarchyField of parsedValue.hierarchyFields)
+    {
+      const filterValidationError = validateFilterFlag(hierarchyField.filter, `hierarchyFields entry ${hierarchyField.key}`)
+
+      if (filterValidationError !== '')
+      {
+        return {
+          fieldMap: null,
+          errorMessage: filterValidationError
+        }
       }
 
-      if (!Array.isArray(field.appendFields)) {
-        return true
+      const appendValidationError = validateAppendFields(hierarchyField)
+
+      if (appendValidationError !== '')
+      {
+        return {
+          fieldMap: null,
+          errorMessage: appendValidationError
+        }
       }
 
-      return field.appendFields.some((appendField) => {
-        return !hasAppendField(appendField)
-      })
-    })
+      const relatedSummaryValidationError = validateRelatedSummaries(hierarchyField)
 
-    if (invalidAppendField) {
-      return {
-        fieldMap: null,
-        errorMessage: 'Each appendFields entry must include key, fieldName, and label. Supported appendFields format values are text, date, datetime, and number. If supplied, filter must be true or false.'
+      if (relatedSummaryValidationError !== '')
+      {
+        return {
+          fieldMap: null,
+          errorMessage: relatedSummaryValidationError
+        }
+      }
+
+
+      const relatedBreakdownValidationError = validateRelatedBreakdowns(hierarchyField)
+
+      if (relatedBreakdownValidationError !== '')
+      {
+        return {
+          fieldMap: null,
+          errorMessage: relatedBreakdownValidationError
+        }
       }
     }
 
-    if (!hasText(parsedValue.featureLabelFieldKey)) {
+    if (!hasText(parsedValue.featureLabelFieldKey))
+    {
       return {
         fieldMap: null,
         errorMessage: 'Field map JSON is missing featureLabelFieldKey.'
@@ -223,41 +535,39 @@ export const parseStructureFieldMap = (fieldMapJson: string | undefined): FieldM
       return field.key === parsedValue.featureLabelFieldKey
     })
 
-    if (!featureLabelFieldExists) {
+    if (!featureLabelFieldExists)
+    {
       return {
         fieldMap: null,
         errorMessage: 'featureLabelFieldKey must match one hierarchyFields key.'
       }
     }
 
-    if (parsedValue.selectableFieldKey !== undefined) {
-      if (!hasText(parsedValue.selectableFieldKey)) {
-        return {
-          fieldMap: null,
-          errorMessage: 'selectableFieldKey must match one hierarchyFields key.'
-        }
-      }
-
+    if (hasText(parsedValue.selectableFieldKey))
+    {
       const selectableFieldExists = parsedValue.hierarchyFields.some((field) => {
         return field.key === parsedValue.selectableFieldKey
       })
 
-      if (!selectableFieldExists) {
+      if (!selectableFieldExists)
+      {
         return {
           fieldMap: null,
-          errorMessage: 'selectableFieldKey must match one hierarchyFields key.'
+          errorMessage: 'selectableFieldKey must match one hierarchyFields key when supplied.'
         }
       }
     }
 
-    if (!parsedValue.identityFields) {
+    if (!parsedValue.identityFields)
+    {
       return {
         fieldMap: null,
         errorMessage: 'Field map JSON is missing identityFields.'
       }
     }
 
-    if (!hasFieldName(parsedValue.identityFields.feature_uid)) {
+    if (!hasFieldName(parsedValue.identityFields.feature_uid))
+    {
       return {
         fieldMap: null,
         errorMessage: 'Field map JSON is missing identityFields.feature_uid.fieldName.'
@@ -266,7 +576,8 @@ export const parseStructureFieldMap = (fieldMapJson: string | undefined): FieldM
 
     const featureAttributeValidationError = validateFeatureAttributes(parsedValue.featureAttributes)
 
-    if (featureAttributeValidationError !== '') {
+    if (featureAttributeValidationError !== '')
+    {
       return {
         fieldMap: null,
         errorMessage: featureAttributeValidationError
@@ -277,7 +588,9 @@ export const parseStructureFieldMap = (fieldMapJson: string | undefined): FieldM
       fieldMap: parsedValue,
       errorMessage: ''
     }
-  } catch {
+  }
+  catch
+  {
     return {
       fieldMap: null,
       errorMessage: 'Field map JSON is not valid JSON.'
@@ -287,9 +600,12 @@ export const parseStructureFieldMap = (fieldMapJson: string | undefined): FieldM
 
 export const getConfiguredFieldNamesFromFieldMap = (fieldMap: StructureFieldMap): string[] => {
   const fieldNames = fieldMap.hierarchyFields.flatMap((field) => {
+    const hierarchyFieldNames = [field.fieldName]
     const appendFieldNames = (field.appendFields || []).map((appendField) => appendField.fieldName)
+    const relatedSummaryJoinFieldNames = (field.relatedSummaries || []).map((summary) => summary.joinField)
+    const relatedBreakdownJoinFieldNames = (field.relatedBreakdowns || []).map((breakdown) => breakdown.joinField)
 
-    return [field.fieldName, ...appendFieldNames]
+    return [...hierarchyFieldNames, ...appendFieldNames, ...relatedSummaryJoinFieldNames, ...relatedBreakdownJoinFieldNames]
   })
 
   fieldNames.push(fieldMap.identityFields.feature_uid.fieldName)
@@ -311,41 +627,4 @@ export const validateFieldMapAgainstAvailableFields = (fieldMap: StructureFieldM
     missingFieldNames,
     isValid: missingFieldNames.length === 0
   }
-}
-
-export const getPlaceholderFiltersFromFieldMap = (fieldMap: StructureFieldMap): PlaceholderFilterConfig[] => {
-  const placeholderFilters: PlaceholderFilterConfig[] = []
-  const seenPlaceholderKeys = new Set<string>()
-
-  fieldMap.hierarchyFields.forEach((field) => {
-    if (field.filter === true) {
-      const dedupeKey = `${field.key}|${field.fieldName}`.toLowerCase()
-
-      if (!seenPlaceholderKeys.has(dedupeKey)) {
-        seenPlaceholderKeys.add(dedupeKey)
-        placeholderFilters.push({
-          id: dedupeKey,
-          key: field.key,
-          label: field.label
-        })
-      }
-    }
-
-    ;(field.appendFields || []).forEach((appendField) => {
-      if (appendField.filter === true) {
-        const dedupeKey = `${appendField.key}|${appendField.fieldName}`.toLowerCase()
-
-        if (!seenPlaceholderKeys.has(dedupeKey)) {
-          seenPlaceholderKeys.add(dedupeKey)
-          placeholderFilters.push({
-            id: dedupeKey,
-            key: appendField.key,
-            label: appendField.label
-          })
-        }
-      }
-    })
-  })
-
-  return placeholderFilters
 }
