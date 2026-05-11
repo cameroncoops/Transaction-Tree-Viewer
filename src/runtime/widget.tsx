@@ -38,7 +38,6 @@ import {
   isConfiguredFeatureLayerMatch,
   normaliseUrl,
   resolveFeatureUidFromHitResult,
-  selectLoadedRecordByFeatureUid,
 } from './lib/selection-utils'
 import {
   getFeatureAttributeStateKey,
@@ -412,6 +411,56 @@ const getFeatureNodesFromBranch = (node: StructureNode): StructureNode[] => {
   })
 
   return node.feature_uid ? [node, ...childFeatureNodes] : childFeatureNodes
+}
+
+const getActiveFilterDebugState = (
+  configuredFilters: ConfiguredFilterField[],
+  selectedFilterValues: { [key: string]: string },
+) => {
+  const activeDirectFilters = configuredFilters
+    .filter((filterField) => {
+      return (
+        filterField.source === 'direct' &&
+        String(selectedFilterValues[filterField.id] || '').trim() !== ''
+      )
+    })
+    .map((filterField) => {
+      return {
+        id: filterField.id,
+        value: String(selectedFilterValues[filterField.id] || '').trim(),
+      }
+    })
+
+  const activeResolvedFilters = configuredFilters
+    .filter((filterField) => {
+      return (
+        filterField.source !== 'direct' &&
+        String(selectedFilterValues[filterField.id] || '').trim() !== ''
+      )
+    })
+    .map((filterField) => {
+      return {
+        id: filterField.id,
+        value: String(selectedFilterValues[filterField.id] || '').trim(),
+      }
+    })
+
+  return {
+    activeDirectFilters,
+    activeResolvedFilters,
+  }
+}
+
+const getDataSourceSelectionDebugState = (dataSource: DataSource | null) => {
+  const loadedRecords = dataSource ? getLoadedRecordsFromDataSource(dataSource) : []
+  const selectedRecords = dataSource && typeof dataSource.getSelectedRecords === 'function'
+    ? dataSource.getSelectedRecords() || []
+    : []
+
+  return {
+    loadedRecordCount: loadedRecords.length,
+    selectedRecordCount: selectedRecords.length,
+  }
 }
 
 const getFilteredHierarchyFields = (
@@ -1641,6 +1690,8 @@ const Widget = (props: AllWidgetProps<Config>) => {
   const relatedSummaryRequestIdRef = useRef(0)
   const relatedFilterOptionsRequestIdRef = useRef(0)
   const mapFilterRequestIdRef = useRef(0)
+  const lastVisibilityWhereRef = useRef('')
+  const ignoredSelectionChangeReasonRef = useRef('')
   const findMatchingJimuLayerViewRef = useRef<() => any | null>(() => null)
   const selectFeatureRef = useRef<(feature_uid: string) => void>(() => {})
   const clearSelectedFeatureRef = useRef<() => void>(() => {})
@@ -1767,7 +1818,16 @@ const Widget = (props: AllWidgetProps<Config>) => {
     }
   }
 
-  const clearFeatureDataSourceSelection = () => {
+  const clearFeatureDataSourceSelection = (reason: string) => {
+    console.log('[TransactionDataSetTreeExplorer] clearing shared selection', {
+      source: reason,
+      selectedUid: selectedFeatureUid,
+      selectedFilterValues,
+      finalVisibilityWhere: lastVisibilityWhereRef.current,
+      ...getDataSourceSelectionDebugState(activeFeatureDs),
+    })
+
+    ignoredSelectionChangeReasonRef.current = reason
     if (activeFeatureDs) {
       clearDataSourceSelection(activeFeatureDs)
     }
@@ -1974,6 +2034,11 @@ const Widget = (props: AllWidgetProps<Config>) => {
     value: string,
     label?: string,
   ) => {
+    console.log('[TransactionDataSetTreeExplorer] setSelectedFilterValues invoked', {
+      source: 'setConfiguredFilterValue',
+      filterId: filterField.id,
+      nextValue: value,
+    })
     setSelectedFilterValues((previous) => {
       return {
         ...previous,
@@ -2019,6 +2084,11 @@ const Widget = (props: AllWidgetProps<Config>) => {
   }
 
   const clearConfiguredFilter = (filterId: string) => {
+    console.log('[TransactionDataSetTreeExplorer] setSelectedFilterValues invoked', {
+      source: 'clearConfiguredFilter',
+      filterId,
+      nextValue: null,
+    })
     setSelectedFilterValues((previous) => {
       const next = { ...previous }
 
@@ -2177,24 +2247,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     })
   }
 
-  const selectFeatureRecordInDataSource = (feature_uid: string) => {
-    if (!activeFeatureDs || !structureFieldMap || feature_uid === '') {
-      return
-    }
-
-    const result = selectLoadedRecordByFeatureUid(
-      activeFeatureDs,
-      structureFieldMap.identityFields.feature_uid.fieldName,
-      feature_uid,
-    )
-
-    if (result.errorMessage !== '') {
-      setSelectionError(result.errorMessage)
-    }
-  }
-
-  const syncSelectedFeatureUidFromDataSource = (
+  const acceptExternalSelectedUid = (
     dataSource: DataSource | null,
+    source: 'datasource-selection',
   ) => {
     if (!dataSource || !structureFieldMap) {
       return
@@ -2210,9 +2265,49 @@ const Widget = (props: AllWidgetProps<Config>) => {
       return
     }
 
+    const filterDebugState = getActiveFilterDebugState(
+      configuredFilterFields,
+      selectedFilterValues,
+    )
+    console.log('[TransactionDataSetTreeExplorer] external selection captured', {
+      source,
+      selectedUid: selectedFeatureUidFromDataSource,
+      activeDirectFiltersBeforeSelection: filterDebugState.activeDirectFilters,
+      activeResolvedFiltersBeforeSelection: filterDebugState.activeResolvedFilters,
+      activeIsolateBeforeSelection: [...isolatedTopLevelValues],
+      finalVisibilityWhereBeforeSelection: lastVisibilityWhereRef.current,
+      selectedUidExcludedFromVisibilityFiltering: true,
+      ...getDataSourceSelectionDebugState(dataSource),
+    })
+
+    if (selectedFeatureUid === selectedFeatureUidFromDataSource) {
+      clearFeatureDataSourceSelection('clear-shared-selection')
+      console.log('[TransactionDataSetTreeExplorer] external selection ignored', {
+        source,
+        selectedUid: selectedFeatureUidFromDataSource,
+        reason: 'uid-already-stored-shared-selection-cleared',
+      })
+      return
+    }
+
+    // Shared ExB datasource selection must not become the visibility source of
+    // truth for this widget. Capture the selected UID, then clear the shared
+    // selection so filters and isolate remain the only visibility drivers.
+    clearFeatureDataSourceSelection('clear-shared-selection')
+
     openFeatureInTree(selectedFeatureUidFromDataSource)
     setSelectedFeatureUid(selectedFeatureUidFromDataSource)
     setSelectionError('')
+
+    console.log('[TransactionDataSetTreeExplorer] local selection applied', {
+      source,
+      selectedUid: selectedFeatureUidFromDataSource,
+      activeDirectFiltersAfterSelection: filterDebugState.activeDirectFilters,
+      activeResolvedFiltersAfterSelection: filterDebugState.activeResolvedFilters,
+      activeIsolateAfterSelection: [...isolatedTopLevelValues],
+      finalVisibilityWhereAfterSelection: lastVisibilityWhereRef.current,
+      selectedUidExcludedFromVisibilityFiltering: true,
+    })
   }
 
   const syncMapToFeature = async (feature_uid: string) => {
@@ -2225,7 +2320,6 @@ const Widget = (props: AllWidgetProps<Config>) => {
       return
     }
 
-    clearFeatureDataSourceSelection()
     clearMapHighlight()
     clearMapViewSelectionState()
 
@@ -2281,10 +2375,27 @@ const Widget = (props: AllWidgetProps<Config>) => {
     }
   }
 
-  const selectFeature = (feature_uid: string) => {
+  const userSelectFeature = (
+    feature_uid: string,
+    source: 'tree-click' | 'map-click',
+  ) => {
+    const filterDebugState = getActiveFilterDebugState(
+      configuredFilterFields,
+      selectedFilterValues,
+    )
+
+    console.log('[TransactionDataSetTreeExplorer] local selection requested', {
+      source,
+      selectedUid: feature_uid,
+      activeDirectFiltersBeforeSelection: filterDebugState.activeDirectFilters,
+      activeResolvedFiltersBeforeSelection: filterDebugState.activeResolvedFilters,
+      activeIsolateBeforeSelection: [...isolatedTopLevelValues],
+      finalVisibilityWhereBeforeSelection: lastVisibilityWhereRef.current,
+      selectedUidExcludedFromVisibilityFiltering: true,
+      ...getDataSourceSelectionDebugState(activeFeatureDs),
+    })
+
     openFeatureInTree(feature_uid)
-    clearFeatureDataSourceSelection()
-    selectFeatureRecordInDataSource(feature_uid)
 
     if (selectedFeatureUid === feature_uid) {
       void syncMapToFeature(feature_uid)
@@ -2293,18 +2404,45 @@ const Widget = (props: AllWidgetProps<Config>) => {
 
     setSelectedFeatureUid(feature_uid)
     setSelectionError('')
+
+    console.log('[TransactionDataSetTreeExplorer] local selection stored', {
+      source,
+      selectedUid: feature_uid,
+      activeDirectFiltersAfterSelection: filterDebugState.activeDirectFilters,
+      activeResolvedFiltersAfterSelection: filterDebugState.activeResolvedFilters,
+      activeIsolateAfterSelection: [...isolatedTopLevelValues],
+      finalVisibilityWhereAfterSelection: lastVisibilityWhereRef.current,
+      selectedUidExcludedFromVisibilityFiltering: true,
+    })
   }
 
   const clearSelectedFeature = () => {
+    const filterDebugState = getActiveFilterDebugState(
+      configuredFilterFields,
+      selectedFilterValues,
+    )
+
     clearMapHighlight()
-    clearFeatureDataSourceSelection()
+    clearFeatureDataSourceSelection('clear-shared-selection')
     clearMapViewSelectionState()
     setSelectedFeatureUid('')
     setSelectionError('')
+
+    console.log('[TransactionDataSetTreeExplorer] selection cleared', {
+      selectedUid: '',
+      activeDirectFiltersAfterSelection: filterDebugState.activeDirectFilters,
+      activeResolvedFiltersAfterSelection: filterDebugState.activeResolvedFilters,
+      activeIsolateAfterSelection: [...isolatedTopLevelValues],
+      finalVisibilityWhereAfterSelection: lastVisibilityWhereRef.current,
+      selectedUidExcludedFromVisibilityFiltering: true,
+      ...getDataSourceSelectionDebugState(activeFeatureDs),
+    })
   }
 
   findMatchingJimuLayerViewRef.current = findMatchingJimuLayerView
-  selectFeatureRef.current = selectFeature
+  selectFeatureRef.current = (feature_uid: string) => {
+    userSelectFeature(feature_uid, 'map-click')
+  }
   clearSelectedFeatureRef.current = clearSelectedFeature
 
   const handleFeatureClick = (node: StructureNode) => {
@@ -2312,7 +2450,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
       return
     }
 
-    selectFeature(node.feature_uid)
+    userSelectFeature(node.feature_uid, 'tree-click')
   }
 
   useEffect(() => {
@@ -2588,6 +2726,10 @@ const Widget = (props: AllWidgetProps<Config>) => {
     const applyMapFilter = async () => {
       const whereParts: string[] = []
       const topLevelField = structureFieldMap.hierarchyFields[0]
+      const filterDebugState = getActiveFilterDebugState(
+        configuredFilterFields,
+        selectedFilterValues,
+      )
 
       if (topLevelField && isolatedTopLevelValues.length > 0) {
         const topLevelFieldName = getLayerFieldName(
@@ -2660,15 +2802,26 @@ const Widget = (props: AllWidgetProps<Config>) => {
       }
 
       if (whereParts.length === 0) {
+        lastVisibilityWhereRef.current = ''
         return
       }
 
       try {
+        lastVisibilityWhereRef.current = whereParts.join(' AND ')
         jsApiLayerView.filter = {
-          where: whereParts.join(' AND '),
+          where: lastVisibilityWhereRef.current,
         }
 
         activeIsolateLayerViewRef.current = jsApiLayerView
+
+        console.log('[TransactionDataSetTreeExplorer] visibility state applied', {
+          activeDirectFilters: filterDebugState.activeDirectFilters,
+          activeResolvedFilters: filterDebugState.activeResolvedFilters,
+          activeIsolate: [...isolatedTopLevelValues],
+          selectedUid: selectedFeatureUid,
+          finalVisibilityWhere: lastVisibilityWhereRef.current,
+          selectedUidExcludedFromVisibilityFiltering: true,
+        })
       } catch (error) {
         console.warn('Failed to apply tree viewer filter', error)
       }
@@ -2812,27 +2965,53 @@ const Widget = (props: AllWidgetProps<Config>) => {
 
           refreshRecordCountFromDataSource(dataSource)
           refreshStructureHierarchyFromDataSource(dataSource, fieldNames)
-          syncSelectedFeatureUidFromDataSource(dataSource)
         }}
         onDataSourceInfoChange={() => {
           if (activeFeatureDs) {
+            const dataSourceDebugState = getDataSourceSelectionDebugState(activeFeatureDs)
+            console.log('[TransactionDataSetTreeExplorer] onDataSourceInfoChange', {
+              source: 'visibility-effect',
+              reason: ignoredSelectionChangeReasonRef.current || 'dataSourceInfoChange',
+              selectedFilterValues,
+              ...dataSourceDebugState,
+            })
+
+            if (ignoredSelectionChangeReasonRef.current !== '') {
+              return
+            }
+
             const fieldNames =
               updateAvailableFieldNamesFromDataSource(activeFeatureDs)
 
             refreshRecordCountFromDataSource(activeFeatureDs)
             refreshStructureHierarchyFromDataSource(activeFeatureDs, fieldNames)
-            syncSelectedFeatureUidFromDataSource(activeFeatureDs)
           }
         }}
         onSelectionChange={() => {
           if (activeFeatureDs) {
-            syncSelectedFeatureUidFromDataSource(activeFeatureDs)
+            console.log('[TransactionDataSetTreeExplorer] onSelectionChange', {
+              source: ignoredSelectionChangeReasonRef.current || 'datasource-selection',
+              reason: 'selectionChange',
+              selectedFilterValues,
+              ...getDataSourceSelectionDebugState(activeFeatureDs),
+            })
+
+            if (ignoredSelectionChangeReasonRef.current !== '') {
+              ignoredSelectionChangeReasonRef.current = ''
+              return
+            }
+
+            acceptExternalSelectedUid(activeFeatureDs, 'datasource-selection')
           }
         }}
         onDataSourceStatusChange={(status) => {
           setIsLoadingFeatures(status === DataSourceStatus.Loading)
         }}
         onCreateDataSourceFailed={(error) => {
+          console.log('[TransactionDataSetTreeExplorer] setSelectedFilterValues invoked', {
+            source: 'onCreateDataSourceFailed',
+            nextValue: {},
+          })
           setLoadError(
             error?.message || 'Failed to connect to the Active Feature Class.',
           )
