@@ -2,7 +2,7 @@ import { React, Immutable, type UseDataSource, DataSourceTypes } from 'jimu-core
 import type { AllWidgetSettingProps } from 'jimu-for-builder'
 import { DataSourceSelector } from 'jimu-ui/advanced/data-source-selector'
 import { MapWidgetSelector } from 'jimu-ui/advanced/setting-components'
-import { TextArea } from 'jimu-ui'
+import { TextArea, TextInput } from 'jimu-ui'
 import type { Config } from '../config'
 
 const getUseDataSourcesArray = (useDataSources: any): UseDataSource[] => {
@@ -87,6 +87,20 @@ const Setting = (props: AllWidgetSettingProps<Config>) => {
     })
   }
 
+  const onWidgetTitleChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    props.onSettingChange({
+      id: props.id,
+      config: props.config.set('widgetTitle', event.target.value),
+    })
+  }
+
+  const onWidgetSubtitleChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    props.onSettingChange({
+      id: props.id,
+      config: props.config.set('widgetSubtitle', event.target.value),
+    })
+  }
+
   return (
     <div className="p-3">
       <h4>Active Feature Explorer Settings</h4>
@@ -123,6 +137,26 @@ const Setting = (props: AllWidgetSettingProps<Config>) => {
         <MapWidgetSelector
           useMapWidgetIds={props.useMapWidgetIds}
           onSelect={onMapWidgetSelected}
+        />
+      </div>
+
+      <div className="mb-4">
+        <div className="mb-2"><strong>Widget title</strong></div>
+
+        <TextInput
+          value={props.config?.widgetTitle || ''}
+          onChange={onWidgetTitleChange}
+          placeholder="Transaction Tree Viewer"
+        />
+      </div>
+
+      <div className="mb-4">
+        <div className="mb-2"><strong>Widget subtitle</strong></div>
+
+        <TextInput
+          value={props.config?.widgetSubtitle || ''}
+          onChange={onWidgetSubtitleChange}
+          placeholder="Explore and filter active features"
         />
       </div>
 

@@ -53,6 +53,8 @@ const { useEffect, useRef, useState } = React
 const ACTIVE_FEATURE_DS_PAGE_SIZE = 2000
 const RELATED_QUERY_PAGE_SIZE = 2000
 const ACCENT_COLOR = '#007ac2'
+const DEFAULT_WIDGET_TITLE = 'Transaction Tree Viewer'
+const DEFAULT_WIDGET_SUBTITLE = 'Explore and filter active features'
 
 const PAGE_STYLE = {
   height: '100%',
@@ -329,6 +331,44 @@ const getFeatureUidsFromNodes = (nodes: StructureNode[]): string[] => {
 
     return [...currentFeatureUid, ...childFeatureUids]
   })
+}
+
+const getExpandableNodeKeysForBranch = (node: StructureNode): string[] => {
+  const childKeys = node.children.flatMap((childNode) => {
+    return getExpandableNodeKeysForBranch(childNode)
+  })
+
+  return [node.nodeKey, ...childKeys]
+}
+
+const findNodeByKey = (
+  nodes: StructureNode[],
+  nodeKey: string,
+): StructureNode | null => {
+  for (const node of nodes)
+  {
+    if (node.nodeKey === nodeKey)
+    {
+      return node
+    }
+
+    const childMatch = findNodeByKey(node.children, nodeKey)
+
+    if (childMatch)
+    {
+      return childMatch
+    }
+  }
+
+  return null
+}
+
+const getFeatureNodesFromBranch = (node: StructureNode): StructureNode[] => {
+  const childFeatureNodes = node.children.flatMap((childNode) => {
+    return getFeatureNodesFromBranch(childNode)
+  })
+
+  return node.feature_uid ? [node, ...childFeatureNodes] : childFeatureNodes
 }
 
 const getFilteredHierarchyFields = (
@@ -1227,6 +1267,14 @@ const Widget = (props: AllWidgetProps<Config>) => {
       ? props.useDataSources[1]
       : null
   const hasStockViewRelatedDataSource = !!summaryAttributeViewUseDataSource
+  const rawWidgetTitle = props.config?.widgetTitle
+  const rawWidgetSubtitle = props.config?.widgetSubtitle
+  const configuredWidgetTitle = String(rawWidgetTitle || '').trim()
+  const configuredWidgetSubtitle = String(rawWidgetSubtitle || '').trim()
+  const widgetTitle = configuredWidgetTitle !== '' ? configuredWidgetTitle : DEFAULT_WIDGET_TITLE
+  const widgetSubtitle = rawWidgetSubtitle === undefined
+    ? DEFAULT_WIDGET_SUBTITLE
+    : configuredWidgetSubtitle
 
   const fieldValidationResult = structureFieldMap
     ? validateFieldMapAgainstAvailableFields(
@@ -1478,12 +1526,29 @@ const Widget = (props: AllWidgetProps<Config>) => {
     })
   }
 
-  const expandAll = () => {
-    setExpandedNodeKeys(getExpandableNodeKeys(structureHierarchy))
-  }
-
   const collapseAll = () => {
     setExpandedNodeKeys([])
+  }
+
+  const expandBranch = (nodeKey: string) => {
+    const matchingNode = findNodeByKey(structureHierarchy, nodeKey)
+
+    if (!matchingNode) {
+      return
+    }
+
+    setExpandedNodeKeys((previous) => {
+      const mergedKeys = new Set([
+        ...previous,
+        ...getExpandableNodeKeysForBranch(matchingNode),
+      ])
+
+      return Array.from(mergedKeys)
+    })
+
+    getFeatureNodesFromBranch(matchingNode).forEach((featureNode) => {
+      void loadRelatedBreakdownsForFeatureNode(featureNode)
+    })
   }
 
   const toggleTopLevelIsolation = (topLevelValue: string) => {
@@ -2184,7 +2249,12 @@ const Widget = (props: AllWidgetProps<Config>) => {
       <div style={PAGE_STYLE}>
         <div style={CONTENT_STYLE}>
           <div style={HEADER_STYLE}>
-            <h3 style={HEADER_TITLE_STYLE}>Transaction Tree Viewer</h3>
+            <h3 style={HEADER_TITLE_STYLE}>{widgetTitle}</h3>
+            {widgetSubtitle !== '' && (
+              <span style={HEADER_SUBTITLE_STYLE}>
+                {widgetSubtitle}
+              </span>
+            )}
           </div>
           <div style={EMPTY_STATE_STYLE}>
             Select the Active Feature Class data source in widget settings.
@@ -2296,10 +2366,12 @@ const Widget = (props: AllWidgetProps<Config>) => {
         data-stock-view-configured={hasStockViewRelatedDataSource ? 'true' : 'false'}
       >
         <div style={HEADER_STYLE}>
-          <h3 style={HEADER_TITLE_STYLE}>Transaction Tree Viewer</h3>
-          <span style={HEADER_SUBTITLE_STYLE}>
-            Explore and filter active features
-          </span>
+          <h3 style={HEADER_TITLE_STYLE}>{widgetTitle}</h3>
+          {widgetSubtitle !== '' && (
+            <span style={HEADER_SUBTITLE_STYLE}>
+              {widgetSubtitle}
+            </span>
+          )}
         </div>
 
         {configuredFilterFields.length > 0 && activeFeatureDs && (
@@ -2441,10 +2513,6 @@ const Widget = (props: AllWidgetProps<Config>) => {
           <button type="button" onClick={collapseAll} style={LINK_BUTTON_STYLE}>
             Collapse All
           </button>
-          <span>|</span>
-          <button type="button" onClick={expandAll} style={LINK_BUTTON_STYLE}>
-            Expand All
-          </button>
         </div>
 
         {loadError !== '' && <div style={MESSAGE_PANEL_STYLE}>{loadError}</div>}
@@ -2481,8 +2549,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
                 onToggleTopLevelIsolation={toggleTopLevelIsolation}
                 onToggleNode={toggleNode}
                 onFeatureNodeExpanded={loadRelatedBreakdownsForFeatureNode}
-                onExpandAll={expandAll}
-                onCollapseAll={collapseAll}
+                onExpandBranch={expandBranch}
                 onFeatureClick={handleFeatureClick}
                 onFeatureRowRef={(feature_uid, element) => {
                   featureRowRefs.current[feature_uid] = element

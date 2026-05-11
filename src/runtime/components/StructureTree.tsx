@@ -24,8 +24,7 @@ interface StructureTreeProps
   relatedBreakdownErrorsByFeatureUid?: { [feature_uid: string]: string }
   isolatedTopLevelValues?: string[]
   onToggleNode: (nodeKey: string) => void
-  onExpandAll: () => void
-  onCollapseAll: () => void
+  onExpandBranch: (nodeKey: string) => void
   onFeatureClick: (node: StructureNode) => void
   onFeatureRowRef: (feature_uid: string, element: HTMLDivElement | null) => void
   onToggleFeatureAttribute: (feature_uid: string, featureAttribute: FeatureAttributeConfig) => void
@@ -34,19 +33,14 @@ interface StructureTreeProps
 }
 
 const ACCENT_COLOR = '#007ac2'
+const CONNECTOR_COLOR = '#d6e4d7'
+const TREE_COLUMN_WIDTH = 22
+const TOP_LEVEL_ISOLATE_COLUMN_WIDTH = 34
+const NON_TOP_LEVEL_PREFIX_WIDTH = TOP_LEVEL_ISOLATE_COLUMN_WIDTH
+const EXPAND_ACTION_COLUMN_WIDTH = 68
 
-const TREE_TOGGLE_STYLE = {
-  background: 'none',
-  border: 'none',
-  color: '#444',
-  textDecoration: 'none',
-  fontWeight: 700,
-  minWidth: '0.8rem',
-  width: '0.8rem',
-  padding: 0,
-  fontSize: '0.72rem',
-  lineHeight: 1,
-  cursor: 'pointer'
+const TREE_WRAPPER_STYLE = {
+  padding: '0.45rem 0.35rem 0.8rem 0.35rem',
 }
 
 const LINK_BUTTON_STYLE = {
@@ -55,7 +49,33 @@ const LINK_BUTTON_STYLE = {
   color: ACCENT_COLOR,
   textDecoration: 'underline',
   cursor: 'pointer',
-  padding: 0
+  padding: 0,
+}
+
+const BRANCH_ACTION_STYLE = {
+  ...LINK_BUTTON_STYLE,
+  fontSize: '0.78rem',
+  lineHeight: 1.2,
+  color: '#4e6c57',
+  justifySelf: 'end' as const,
+}
+
+const TREE_TOGGLE_STYLE = {
+  background: 'none',
+  border: 'none',
+  color: '#486152',
+  textDecoration: 'none',
+  fontWeight: 700,
+  width: `${TREE_COLUMN_WIDTH}px`,
+  height: `${TREE_COLUMN_WIDTH}px`,
+  minWidth: `${TREE_COLUMN_WIDTH}px`,
+  padding: 0,
+  fontSize: '0.72rem',
+  lineHeight: 1,
+  cursor: 'pointer',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
 }
 
 const FEATURE_BUTTON_STYLE = {
@@ -63,20 +83,19 @@ const FEATURE_BUTTON_STYLE = {
   textAlign: 'left' as const,
   border: 'none',
   background: 'transparent',
-  padding: '2px 0',
-  cursor: 'pointer'
+  padding: '0.1rem 0',
+  cursor: 'pointer',
 }
 
 const APPENDED_VALUE_STYLE = {
-  color: '#666',
+  color: '#5f6c64',
   fontWeight: 400,
-  fontSize: '0.88rem'
+  fontSize: '0.86rem',
 }
 
-const DETAIL_ROW_STYLE = {
-  color: '#222',
-  fontSize: '0.9rem',
-  padding: '2px 0'
+const EMPTY_STATE_STYLE = {
+  margin: 0,
+  color: '#6a746d',
 }
 
 const getTreeToggleIcon = (isExpanded: boolean): string => {
@@ -124,7 +143,7 @@ const formatDisplayValue = (value: unknown, format?: string): string => {
       return `${datePart} ${dateValue.toLocaleTimeString('en-AU', {
         hour: '2-digit',
         minute: '2-digit',
-        hour12: false
+        hour12: false,
       })}`
     }
   }
@@ -161,17 +180,6 @@ const renderAppendedDisplayValues = (node: StructureNode): JSX.Element | null =>
   )
 }
 
-const getSelectedFeatureRowStyle = (isSelected: boolean) => {
-  return {
-    marginBottom: '0.2rem',
-    padding: isSelected ? '0.25rem 0.5rem' : 0,
-    marginLeft: isSelected ? '-0.5rem' : 0,
-    borderLeft: isSelected ? `3px solid ${ACCENT_COLOR}` : '3px solid transparent',
-    backgroundColor: isSelected ? '#eef7fd' : 'transparent',
-    borderRadius: '4px'
-  }
-}
-
 const hasConfiguredRelatedBreakdowns = (node: StructureNode, props: StructureTreeProps): boolean => {
   if (!node.feature_uid)
   {
@@ -185,41 +193,148 @@ const hasConfiguredRelatedBreakdowns = (node: StructureNode, props: StructureTre
   return Array.isArray(hierarchyField?.relatedBreakdowns) && hierarchyField.relatedBreakdowns.length > 0
 }
 
+const getNodeIndent = (node: StructureNode): number => {
+  if (String(node.fieldKey || '').startsWith('related:'))
+  {
+    return node.children.length > 0 ? 48 : 72
+  }
+
+  if (node.depth <= 0)
+  {
+    return 8
+  }
+
+  if (node.depth === 1)
+  {
+    return 24
+  }
+
+  return 48
+}
+
+const getNodeTextStyle = (node: StructureNode, isSelected: boolean, hasChildren: boolean) => {
+  if (String(node.fieldKey || '').startsWith('related:'))
+  {
+    return {
+      fontSize: node.children.length > 0 ? '0.9rem' : '0.82rem',
+      fontWeight: node.children.length > 0 ? 500 : 400,
+      color: node.children.length > 0 ? '#24312a' : '#6a746d',
+    }
+  }
+
+  if (node.depth <= 1)
+  {
+    return {
+      fontSize: node.depth === 0 ? '0.94rem' : '0.88rem',
+      fontWeight: 600,
+      color: '#203028',
+    }
+  }
+
+  return {
+    fontSize: '0.88rem',
+    fontWeight: isSelected ? 600 : hasChildren ? 500 : 400,
+    color: '#24312a',
+  }
+}
+
+const getSelectedFeatureRowStyle = (isSelected: boolean) => {
+  return {
+    borderLeft: isSelected ? `3px solid ${ACCENT_COLOR}` : '3px solid transparent',
+    backgroundColor: isSelected ? '#f5fbff' : 'transparent',
+    borderRadius: '6px',
+    padding: isSelected ? '0.08rem 0.3rem 0.08rem 0.45rem' : '0.08rem 0.3rem 0.08rem 0.45rem',
+  }
+}
+
+const getConnectorGuideStyle = (
+  indent: number,
+  isLastChild: boolean,
+) => {
+  return {
+    position: 'absolute' as const,
+    left: `${indent + 10}px`,
+    top: '-0.15rem',
+    width: '1px',
+    height: isLastChild ? '1.15rem' : undefined,
+    bottom: isLastChild ? undefined : '-0.2rem',
+    backgroundColor: CONNECTOR_COLOR,
+    pointerEvents: 'none' as const,
+  }
+}
+
+const getConnectorElbowStyle = (indent: number) => {
+  return {
+    position: 'absolute' as const,
+    left: `${indent + 10}px`,
+    top: '1rem',
+    width: '14px',
+    height: '1px',
+    backgroundColor: CONNECTOR_COLOR,
+    pointerEvents: 'none' as const,
+  }
+}
+
 const renderRelatedNode = (
   node: StructureNode,
   props: StructureTreeProps,
-  displayDepth: number
+  isLastChild: boolean,
 ): JSX.Element => {
   const isExpanded = props.expandedNodeKeys.includes(node.nodeKey)
   const hasChildren = node.children.length > 0
+  const indent = getNodeIndent(node)
   const displayText = node.label && node.label.trim() !== ''
     ? `${node.label}: ${node.value}`
     : node.value
+  const textStyle = getNodeTextStyle(node, false, hasChildren)
 
   return (
-    <div key={node.nodeKey} style={{ marginLeft: `${displayDepth}rem`, marginBottom: '0.15rem' }}>
-      {hasChildren ? (
-        <button
-          type="button"
-          onClick={() => {
-            props.onToggleNode(node.nodeKey)
-          }}
-          aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${displayText}`}
-          style={TREE_TOGGLE_STYLE}
-        >
-          {getTreeToggleIcon(isExpanded)}
-        </button>
-      ) : (
-        <span style={{ display: 'inline-block', width: '0.8rem', color: '#666' }}>•</span>
-      )}
+    <div key={node.nodeKey} style={{ position: 'relative', marginBottom: '0.08rem' }}>
+      <span style={getConnectorGuideStyle(indent, isLastChild)} />
+      <span style={getConnectorElbowStyle(indent)} />
 
-      <span style={DETAIL_ROW_STYLE}>
-        <span style={{ fontWeight: hasChildren ? 600 : 400 }}>{displayText}</span>
-        {renderAppendedDisplayValues(node)}
-      </span>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: `${TOP_LEVEL_ISOLATE_COLUMN_WIDTH}px ${TREE_COLUMN_WIDTH}px minmax(0, 1fr) ${EXPAND_ACTION_COLUMN_WIDTH}px`,
+          alignItems: 'start',
+          paddingLeft: `${indent}px`,
+          minHeight: '1.55rem',
+        }}
+      >
+        <span />
 
-      {isExpanded && node.children.map((childNode) => {
-        return renderRelatedNode(childNode, props, displayDepth + 1)
+        {hasChildren ? (
+          <button
+            type="button"
+            onClick={() => {
+              props.onToggleNode(node.nodeKey)
+            }}
+            aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${displayText}`}
+            style={TREE_TOGGLE_STYLE}
+          >
+            {getTreeToggleIcon(isExpanded)}
+          </button>
+        ) : (
+          <span style={{ ...TREE_TOGGLE_STYLE, cursor: 'default', color: '#98aaa0' }}>
+            •
+          </span>
+        )}
+
+        <div style={{ paddingTop: '0.08rem', ...textStyle }}>
+          {displayText}
+          {renderAppendedDisplayValues(node)}
+        </div>
+
+        <span />
+      </div>
+
+      {isExpanded && node.children.map((childNode, childIndex) => {
+        return renderRelatedNode(
+          childNode,
+          props,
+          childIndex === node.children.length - 1,
+        )
       })}
     </div>
   )
@@ -243,27 +358,35 @@ const renderRelatedBreakdownArea = (node: StructureNode, props: StructureTreePro
   const relatedNodes = props.relatedBreakdownNodesByFeatureUid?.[node.feature_uid] || []
 
   return (
-    <div style={{ marginTop: '0.15rem' }}>
+    <div style={{ marginTop: '0.1rem' }}>
       {isLoading && (
-        <div style={{ marginLeft: `${node.depth + 1}rem`, color: '#777', fontSize: '0.85rem' }}>
+        <div style={{ marginLeft: '72px', color: '#777', fontSize: '0.85rem' }}>
           Loading plant lines...
         </div>
       )}
 
       {errorMessage !== '' && (
-        <div style={{ marginLeft: `${node.depth + 1}rem`, color: '#a12626', fontSize: '0.85rem' }}>
+        <div style={{ marginLeft: '72px', color: '#a12626', fontSize: '0.85rem' }}>
           {errorMessage}
         </div>
       )}
 
-      {!isLoading && errorMessage === '' && relatedNodes.map((relatedNode) => {
-        return renderRelatedNode(relatedNode, props, node.depth + 1)
+      {!isLoading && errorMessage === '' && relatedNodes.map((relatedNode, relatedIndex) => {
+        return renderRelatedNode(
+          relatedNode,
+          props,
+          relatedIndex === relatedNodes.length - 1,
+        )
       })}
     </div>
   )
 }
 
-const renderNode = (node: StructureNode, props: StructureTreeProps): JSX.Element => {
+const renderNode = (
+  node: StructureNode,
+  props: StructureTreeProps,
+  isLastChild: boolean,
+): JSX.Element => {
   const isFeatureNode = !!node.feature_uid
   const isSelected = node.feature_uid === props.selectedFeatureUid
   const isExpanded = props.expandedNodeKeys.includes(node.nodeKey)
@@ -272,6 +395,8 @@ const renderNode = (node: StructureNode, props: StructureTreeProps): JSX.Element
   const hasChildren = hasNormalChildren || canExpandRelatedDetails
   const isTopLevel = node.depth === 0 && !String(node.fieldKey || '').startsWith('related:')
   const isIsolated = !!props.isolatedTopLevelValues?.includes(node.value)
+  const indent = getNodeIndent(node)
+  const textStyle = getNodeTextStyle(node, isSelected, hasChildren)
 
   const handleToggle = () => {
     const willExpand = !isExpanded
@@ -285,7 +410,10 @@ const renderNode = (node: StructureNode, props: StructureTreeProps): JSX.Element
   }
 
   return (
-    <div key={node.nodeKey} style={{ marginBottom: '0.2rem', marginLeft: `${node.depth}rem` }}>
+    <div key={node.nodeKey} style={{ position: 'relative', marginBottom: '0.08rem' }}>
+      {node.depth > 0 && <span style={getConnectorGuideStyle(indent, isLastChild)} />}
+      {node.depth > 0 && <span style={getConnectorElbowStyle(indent)} />}
+
       <div
         ref={(element) => {
           if (node.feature_uid)
@@ -293,7 +421,14 @@ const renderNode = (node: StructureNode, props: StructureTreeProps): JSX.Element
             props.onFeatureRowRef(node.feature_uid, element)
           }
         }}
-        style={isFeatureNode ? getSelectedFeatureRowStyle(isSelected) : undefined}
+        style={{
+          ...getSelectedFeatureRowStyle(isFeatureNode && isSelected),
+          display: 'grid',
+          gridTemplateColumns: `${TOP_LEVEL_ISOLATE_COLUMN_WIDTH}px ${TREE_COLUMN_WIDTH}px minmax(0, 1fr) ${EXPAND_ACTION_COLUMN_WIDTH}px`,
+          alignItems: 'start',
+          paddingLeft: `${indent}px`,
+          minHeight: '1.7rem',
+        }}
       >
         {isTopLevel && props.onToggleTopLevelIsolation && (
           <input
@@ -302,12 +437,12 @@ const renderNode = (node: StructureNode, props: StructureTreeProps): JSX.Element
             onChange={() => {
               props.onToggleTopLevelIsolation?.(node.value)
             }}
-            style={{ marginRight: '0.6rem' }}
+            style={{ marginTop: '0.28rem' }}
           />
         )}
 
         {!isTopLevel && (
-          <span style={{ display: 'inline-block', width: '1.35rem' }} />
+          <span style={{ width: `${NON_TOP_LEVEL_PREFIX_WIDTH}px` }} />
         )}
 
         {hasChildren ? (
@@ -320,46 +455,65 @@ const renderNode = (node: StructureNode, props: StructureTreeProps): JSX.Element
             {getTreeToggleIcon(isExpanded)}
           </button>
         ) : (
-          <span style={{ display: 'inline-block', width: '0.8rem' }} />
+          <span style={{ ...TREE_TOGGLE_STYLE, cursor: 'default', color: '#b0bdb5' }} />
         )}
 
-        {isFeatureNode ? (
+        <div style={{ minWidth: 0, paddingTop: '0.08rem' }}>
+          {isFeatureNode ? (
+            <button
+              type="button"
+              onClick={() => {
+                props.onFeatureClick(node)
+              }}
+              style={{
+                ...FEATURE_BUTTON_STYLE,
+                ...textStyle,
+              }}
+            >
+              {node.label}: {node.featureLabel || node.value}
+              {renderAppendedDisplayValues(node)}
+            </button>
+          ) : (
+            <div style={textStyle}>
+              {node.label}: {node.value}
+              {renderAppendedDisplayValues(node)}
+            </div>
+          )}
+
+          {node.feature_uid && (
+            <FeatureAttributes
+              feature_uid={node.feature_uid}
+              featureAttributes={props.structureFieldMap.featureAttributes}
+              expandedFeatureAttributeKeys={props.expandedFeatureAttributeKeys}
+              loadingFeatureAttributeKeys={props.loadingFeatureAttributeKeys}
+              featureAttributeRecords={props.featureAttributeRecords}
+              featureAttributeErrors={props.featureAttributeErrors}
+              onToggleFeatureAttribute={props.onToggleFeatureAttribute}
+            />
+          )}
+        </div>
+
+        {isTopLevel && hasChildren ? (
           <button
             type="button"
             onClick={() => {
-              props.onFeatureClick(node)
+              props.onExpandBranch(node.nodeKey)
             }}
-            style={{
-              ...FEATURE_BUTTON_STYLE,
-              fontWeight: isSelected ? 700 : 500
-            }}
+            style={BRANCH_ACTION_STYLE}
           >
-            {node.label}: {node.featureLabel || node.value}
-            {renderAppendedDisplayValues(node)}
+            Expand
           </button>
         ) : (
-          <strong>
-            {' '}
-            {node.label}: {node.value}
-            {renderAppendedDisplayValues(node)}
-          </strong>
-        )}
-
-        {node.feature_uid && (
-          <FeatureAttributes
-            feature_uid={node.feature_uid}
-            featureAttributes={props.structureFieldMap.featureAttributes}
-            expandedFeatureAttributeKeys={props.expandedFeatureAttributeKeys}
-            loadingFeatureAttributeKeys={props.loadingFeatureAttributeKeys}
-            featureAttributeRecords={props.featureAttributeRecords}
-            featureAttributeErrors={props.featureAttributeErrors}
-            onToggleFeatureAttribute={props.onToggleFeatureAttribute}
-          />
+          <span />
         )}
       </div>
 
-      {isExpanded && hasNormalChildren && node.children.map((childNode) => {
-        return renderNode(childNode, props)
+      {isExpanded && hasNormalChildren && node.children.map((childNode, childIndex) => {
+        return renderNode(
+          childNode,
+          props,
+          childIndex === node.children.length - 1,
+        )
       })}
 
       {renderRelatedBreakdownArea(node, props)}
@@ -369,35 +523,17 @@ const renderNode = (node: StructureNode, props: StructureTreeProps): JSX.Element
 
 const StructureTree = (props: StructureTreeProps) => {
   return (
-    <div className="mt-3">
+    <div style={TREE_WRAPPER_STYLE}>
       {props.structureHierarchy.length === 0 && (
-        <p>No structure records loaded.</p>
+        <p style={EMPTY_STATE_STYLE}>No structure records loaded.</p>
       )}
 
-      {props.structureHierarchy.length > 0 && (
-        <div style={{ marginBottom: '0.75rem' }}>
-          <button
-            type="button"
-            onClick={props.onExpandAll}
-            style={LINK_BUTTON_STYLE}
-          >
-            Expand all
-          </button>
-
-          <span> | </span>
-
-          <button
-            type="button"
-            onClick={props.onCollapseAll}
-            style={LINK_BUTTON_STYLE}
-          >
-            Collapse all
-          </button>
-        </div>
-      )}
-
-      {props.structureHierarchy.map((node) => {
-        return renderNode(node, props)
+      {props.structureHierarchy.map((node, nodeIndex) => {
+        return renderNode(
+          node,
+          props,
+          nodeIndex === props.structureHierarchy.length - 1,
+        )
       })}
     </div>
   )
