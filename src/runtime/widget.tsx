@@ -256,6 +256,22 @@ interface ConfiguredFilterField {
   id: string
   label: string
   fieldName: string
+  source: 'direct' | 'relatedBreakdown' | 'resolvedLookup'
+  relatedSourceKey?: string
+  relatedJoinField?: string
+  joinField?: string
+  filterDisplayField?: string
+  filterValueField?: string
+  filterOptionsSourceKey?: string
+  filterResolveSourceKey?: string
+  filterResolveValueField?: string
+  filterResolveJoinField?: string
+  targetField?: string
+}
+
+interface FilterOption {
+  label: string
+  value: string
 }
 
 interface RelatedDataSourceRuntimeMap {
@@ -276,6 +292,14 @@ interface ViewEventHandle {
 
 interface HighlightHandle {
   remove: () => void
+}
+
+const addSourceKeyIfPresent = (sourceKeys: string[], value: unknown) => {
+  const sourceKey = String(value || '').trim()
+
+  if (sourceKey !== '' && !sourceKeys.includes(sourceKey)) {
+    sourceKeys.push(sourceKey)
+  }
 }
 
 const getRelatedSummaryDefinitions = (fieldMap: StructureFieldMap): RelatedSummaryDefinition[] => {
@@ -314,14 +338,33 @@ const getRelatedSourceKeysFromFieldMap = (fieldMap: StructureFieldMap | null): s
     return []
   }
 
-  const summaryKeys = getRelatedSummaryDefinitions(fieldMap).map((summary) => {
-    return summary.relatedSourceKey
+  const sourceKeys: string[] = []
+
+  getRelatedSummaryDefinitions(fieldMap).forEach((summary) => {
+    addSourceKeyIfPresent(sourceKeys, summary.relatedSourceKey)
   })
-  const breakdownKeys = getRelatedBreakdownDefinitions(fieldMap).map((breakdown) => {
-    return breakdown.relatedSourceKey
+  getRelatedBreakdownDefinitions(fieldMap).forEach((breakdown) => {
+    addSourceKeyIfPresent(sourceKeys, breakdown.relatedSourceKey)
+    addSourceKeyIfPresent(sourceKeys, breakdown.filterOptionsSourceKey)
+    addSourceKeyIfPresent(sourceKeys, breakdown.filterResolveSourceKey)
   })
 
-  return Array.from(new Set([...summaryKeys, ...breakdownKeys]))
+  return sourceKeys
+}
+
+// `useDataSources[0]` is always the main tree source. Additional configured
+// source keys are mapped onto `useDataSources[1..]` in first-seen order so
+// future keys can claim the next available datasource slots without inventing
+// a parallel config system.
+const getRelatedSourceKeyIndexMap = (
+  fieldMap: StructureFieldMap | null,
+): { [sourceKey: string]: number } => {
+  const sourceKeys = getRelatedSourceKeysFromFieldMap(fieldMap)
+
+  return sourceKeys.reduce((accumulator, sourceKey, index) => {
+    accumulator[sourceKey] = index + 1
+    return accumulator
+  }, {} as { [sourceKey: string]: number })
 }
 
 const getFeatureUidsFromNodes = (nodes: StructureNode[]): string[] => {
@@ -385,11 +428,12 @@ const getFilteredHierarchyFields = (
 
       if (!seenFilterIds.has(id)) {
         seenFilterIds.add(id)
-        filters.push({
-          id,
-          label: hierarchyField.label,
-          fieldName: hierarchyField.fieldName,
-        })
+          filters.push({
+            id,
+            label: hierarchyField.label,
+            fieldName: hierarchyField.fieldName,
+            source: 'direct',
+          })
       }
     }
 
@@ -417,6 +461,70 @@ const getFilteredHierarchyFields = (
             id,
             label: appendLabel,
             fieldName: appendFieldName,
+            source: 'direct',
+          })
+        }
+      }
+    })
+
+    const relatedBreakdowns = Array.isArray(fieldAsAny.relatedBreakdowns)
+      ? fieldAsAny.relatedBreakdowns
+      : []
+
+    relatedBreakdowns.forEach((relatedBreakdown: any) => {
+      if (relatedBreakdown && relatedBreakdown.filter === true) {
+        const id = `relatedBreakdown:${hierarchyField.key}:${String(relatedBreakdown.key || '').trim()}`
+        const firstGroupField = Array.isArray(relatedBreakdown.groupBy) && relatedBreakdown.groupBy.length > 0
+          ? relatedBreakdown.groupBy[0]
+          : null
+        const filterDisplayField = String(
+          relatedBreakdown.filterDisplayField ||
+          firstGroupField?.fieldName ||
+          '',
+        ).trim()
+        const filterValueField = String(
+          relatedBreakdown.filterValueField ||
+          firstGroupField?.fieldName ||
+          '',
+        ).trim()
+
+        if (
+          id !== 'relatedBreakdown::' &&
+          filterDisplayField !== '' &&
+          filterValueField !== '' &&
+          !seenFilterIds.has(id)
+        ) {
+          seenFilterIds.add(id)
+          filters.push({
+            id,
+            label: String(relatedBreakdown.label || hierarchyField.label).trim(),
+            fieldName: String(
+              relatedBreakdown.targetField ||
+              relatedBreakdown.joinField ||
+              '',
+            ).trim(),
+            source:
+              String(relatedBreakdown.filterType || '').trim() === 'resolved'
+                ? 'resolvedLookup'
+                : 'relatedBreakdown',
+            relatedSourceKey: String(relatedBreakdown.relatedSourceKey || '').trim(),
+            relatedJoinField: String(relatedBreakdown.relatedJoinField || '').trim(),
+            joinField: String(relatedBreakdown.joinField || '').trim(),
+            filterDisplayField,
+            filterValueField,
+            filterOptionsSourceKey: String(
+              relatedBreakdown.filterOptionsSourceKey || '',
+            ).trim(),
+            filterResolveSourceKey: String(
+              relatedBreakdown.filterResolveSourceKey || '',
+            ).trim(),
+            filterResolveValueField: String(
+              relatedBreakdown.filterResolveValueField || '',
+            ).trim(),
+            filterResolveJoinField: String(
+              relatedBreakdown.filterResolveJoinField || '',
+            ).trim(),
+            targetField: String(relatedBreakdown.targetField || '').trim(),
           })
         }
       }
@@ -516,6 +624,36 @@ const queryRelatedRecords = async (
   })
 
   return getQueryRecords(queryResult)
+}
+
+// Lookup option and resolved-filter queries may need more than one page of
+// results. Keep this on `dataSource.query(...)` so the widget does not depend
+// on `queryAll(...)` support or return-shape differences.
+const queryPagedRelatedRecords = async (
+  relatedDataSource: any,
+  query: any,
+): Promise<any[]> => {
+  const allRecords: any[] = []
+  let page = 1
+
+  while (true) {
+    const pageQuery = {
+      ...query,
+      page,
+      pageSize: RELATED_QUERY_PAGE_SIZE,
+      resultRecordCount: RELATED_QUERY_PAGE_SIZE,
+    }
+    const queryResult = await relatedDataSource.query(pageQuery)
+    const pageRecords = getQueryRecords(queryResult)
+
+    allRecords.push(...pageRecords)
+
+    if (pageRecords.length < RELATED_QUERY_PAGE_SIZE) {
+      return allRecords
+    }
+
+    page += 1
+  }
 }
 
 const buildTextInClause = (fieldName: string, values: string[]): string => {
@@ -1138,19 +1276,22 @@ const queryRelatedBreakdownNodesByFeatureUid = async (
 const getFilterOptionsFromRecords = (
   records: any[],
   filterField: ConfiguredFilterField,
-): string[] => {
-  const values = new Set<string>()
+): FilterOption[] => {
+  const values = new Map<string, FilterOption>()
 
   records.forEach((record) => {
     const value = getRecordFilterValue(record, filterField.fieldName)
 
-    if (value !== '') {
-      values.add(value)
+    if (value !== '' && !values.has(value)) {
+      values.set(value, {
+        label: value,
+        value,
+      })
     }
   })
 
-  return Array.from(values).sort((first, second) => {
-    return first.localeCompare(second, undefined, {
+  return Array.from(values.values()).sort((first, second) => {
+    return first.label.localeCompare(second.label, undefined, {
       numeric: true,
       sensitivity: 'base',
     })
@@ -1158,9 +1299,9 @@ const getFilterOptionsFromRecords = (
 }
 
 const getVisibleFilterOptions = (
-  options: string[],
+  options: FilterOption[],
   searchText: string,
-): string[] => {
+): FilterOption[] => {
   const cleanSearchText = String(searchText || '')
     .trim()
     .toLowerCase()
@@ -1170,17 +1311,20 @@ const getVisibleFilterOptions = (
   }
 
   return options.filter((optionValue) => {
-    return optionValue.toLowerCase().includes(cleanSearchText)
+    return optionValue.label.toLowerCase().includes(cleanSearchText)
   })
 }
 
-const getFilteredRecords = (
+const getMainSourceFilteredRecords = (
   records: any[],
   configuredFilters: ConfiguredFilterField[],
   selectedFilterValues: { [key: string]: string },
 ): any[] => {
   const activeFilters = configuredFilters.filter((filterField) => {
-    return String(selectedFilterValues[filterField.id] || '').trim() !== ''
+    return (
+      filterField.source === 'direct' &&
+      String(selectedFilterValues[filterField.id] || '').trim() !== ''
+    )
   })
 
   if (activeFilters.length === 0) {
@@ -1195,6 +1339,245 @@ const getFilteredRecords = (
       )
     })
   })
+}
+
+// Direct filters read options and values from the main datasource. Resolved
+// filters keep the dropdown options source separate from the resolve source so
+// a lookup table can provide clean labels while a related/summary table maps
+// the selected value back to main-tree IDs.
+const queryRelatedFilterOptions = async (
+  filterField: ConfiguredFilterField,
+  relatedDataSourceByKey: RelatedDataSourceRuntimeMap,
+): Promise<FilterOption[]> => {
+  if (
+    (filterField.source !== 'relatedBreakdown' &&
+      filterField.source !== 'resolvedLookup') ||
+    !filterField.filterDisplayField ||
+    !filterField.filterValueField
+  ) {
+    return []
+  }
+
+  const optionsSourceKey = filterField.source === 'resolvedLookup'
+    ? filterField.filterOptionsSourceKey
+    : filterField.relatedSourceKey
+  const relatedDataSource = optionsSourceKey
+    ? relatedDataSourceByKey[optionsSourceKey]
+    : null
+
+  if (!relatedDataSource || typeof (relatedDataSource as any).query !== 'function') {
+    return []
+  }
+
+  const relatedRecords = await queryPagedRelatedRecords(relatedDataSource, {
+    where: '1 = 1',
+    outFields: [
+      filterField.filterDisplayField,
+      filterField.filterValueField,
+    ],
+    returnGeometry: false,
+  })
+
+  const optionsByValue = new Map<string, FilterOption>()
+
+  relatedRecords.forEach((relatedRecord) => {
+    const optionValue = getRecordFilterValue(
+      relatedRecord,
+      filterField.filterValueField || '',
+    )
+    const optionLabel = getRecordFilterValue(
+      relatedRecord,
+      filterField.filterDisplayField || '',
+    )
+
+    if (optionValue === '' || optionLabel === '' || optionsByValue.has(optionValue)) {
+      return
+    }
+
+    optionsByValue.set(optionValue, {
+      label: optionLabel,
+      value: optionValue,
+    })
+  })
+
+  return Array.from(optionsByValue.values()).sort((first, second) => {
+    return first.label.localeCompare(second.label, undefined, {
+      numeric: true,
+      sensitivity: 'base',
+    })
+  })
+}
+
+const resolveFilterTargetField = (
+  filterField: ConfiguredFilterField,
+  structureFieldMap: StructureFieldMap,
+): string => {
+  if (filterField.source === 'resolvedLookup') {
+    const configuredTargetField = String(filterField.targetField || '').trim()
+
+    if (configuredTargetField !== '') {
+      return configuredTargetField
+    }
+
+    return structureFieldMap.identityFields.feature_uid.fieldName
+  }
+
+  return String(filterField.joinField || '').trim()
+}
+
+const getRelatedDataSourceDebugName = (relatedDataSource: any): string => {
+  if (typeof relatedDataSource?.getLabel === 'function') {
+    return String(relatedDataSource.getLabel() || '').trim()
+  }
+
+  return String(relatedDataSource?.id || '').trim()
+}
+
+const resolveFilterJoinValues = async (
+  filterField: ConfiguredFilterField,
+  selectedValue: string,
+  relatedDataSourceByKey: RelatedDataSourceRuntimeMap,
+  structureFieldMap: StructureFieldMap,
+): Promise<{
+  targetField: string
+  resolvedWhereClause: string
+  resolvedJoinValues: string[]
+}> => {
+  const resolveSourceKey = filterField.source === 'resolvedLookup'
+    ? filterField.filterResolveSourceKey
+    : filterField.relatedSourceKey
+  const resolveValueField = filterField.source === 'resolvedLookup'
+    ? filterField.filterResolveValueField
+    : filterField.filterValueField
+  const resolveJoinField = filterField.source === 'resolvedLookup'
+    ? filterField.filterResolveJoinField
+    : filterField.relatedJoinField
+  const targetField = resolveFilterTargetField(filterField, structureFieldMap)
+
+  if (!resolveSourceKey || !resolveValueField || !resolveJoinField || !targetField) {
+    return {
+      targetField,
+      resolvedWhereClause: '',
+      resolvedJoinValues: [],
+    }
+  }
+
+  const relatedDataSource = relatedDataSourceByKey[resolveSourceKey]
+  const resolvedWhereClause = buildTextEqualityClause(resolveValueField, selectedValue)
+
+  if (!relatedDataSource || typeof (relatedDataSource as any).query !== 'function') {
+    console.warn('[TransactionDataSetTreeExplorer] resolved filter datasource unavailable', {
+      filterId: filterField.id,
+      selectedSpeciesUid: selectedValue,
+      resolveSourceKey,
+      targetField,
+    })
+
+    return {
+      targetField,
+      resolvedWhereClause,
+      resolvedJoinValues: [],
+    }
+  }
+
+  const relatedRecords = await queryPagedRelatedRecords(relatedDataSource, {
+    where: resolvedWhereClause,
+    outFields: [resolveJoinField],
+    returnGeometry: false,
+  })
+  const resolvedJoinValues = Array.from(new Set(
+    relatedRecords
+      .map((relatedRecord) => {
+        return getRecordFilterValue(relatedRecord, resolveJoinField)
+      })
+      .filter((value) => value !== ''),
+  ))
+
+  console.log('[TransactionDataSetTreeExplorer] resolved filter debug', {
+    filterId: filterField.id,
+    selectedSpeciesUid: selectedValue,
+    resolveDataSourceId: String((relatedDataSource as any)?.id || ''),
+    resolveDataSourceName: getRelatedDataSourceDebugName(relatedDataSource),
+    resolveWhereClause: resolvedWhereClause,
+    resolveRecordCount: relatedRecords.length,
+    firstResolvedGardenUids: resolvedJoinValues.slice(0, 5),
+    mainTargetField: targetField,
+  })
+
+  return {
+    targetField,
+    resolvedWhereClause,
+    resolvedJoinValues,
+  }
+}
+
+const getRelatedBreakdownFilteredRecords = async (
+  records: any[],
+  configuredFilters: ConfiguredFilterField[],
+  selectedFilterValues: { [key: string]: string },
+  relatedDataSourceByKey: RelatedDataSourceRuntimeMap,
+  structureFieldMap: StructureFieldMap,
+): Promise<any[]> => {
+  // Direct filters have already been applied against the main datasource.
+  // Any non-direct filter resolves the selected lookup value into a set of
+  // target IDs, then the main records must satisfy every active resolved set.
+  const activeRelatedFilters = configuredFilters.filter((filterField) => {
+    return (
+      filterField.source !== 'direct' &&
+      String(selectedFilterValues[filterField.id] || '').trim() !== ''
+    )
+  })
+
+  if (activeRelatedFilters.length === 0) {
+    return records
+  }
+
+  const matchingJoinValuesByFilterId: { [filterId: string]: Set<string> } = {}
+  const targetFieldByFilterId: { [filterId: string]: string } = {}
+
+  for (const filterField of activeRelatedFilters) {
+    const selectedValue = String(selectedFilterValues[filterField.id] || '').trim()
+    const resolvedFilter = await resolveFilterJoinValues(
+      filterField,
+      selectedValue,
+      relatedDataSourceByKey,
+      structureFieldMap,
+    )
+
+    targetFieldByFilterId[filterField.id] = resolvedFilter.targetField
+    matchingJoinValuesByFilterId[filterField.id] = new Set(
+      resolvedFilter.resolvedJoinValues,
+    )
+  }
+
+  const filteredRecords = records.filter((record) => {
+    return activeRelatedFilters.every((filterField) => {
+      const targetField =
+        targetFieldByFilterId[filterField.id] ||
+        resolveFilterTargetField(filterField, structureFieldMap)
+      const joinFieldValue = getRecordFilterValue(record, targetField)
+      const matchingJoinValues = matchingJoinValuesByFilterId[filterField.id]
+
+      if (!matchingJoinValues || matchingJoinValues.size === 0) {
+        return false
+      }
+
+      return matchingJoinValues.has(joinFieldValue)
+    })
+  })
+
+  activeRelatedFilters.forEach((filterField) => {
+    console.log('[TransactionDataSetTreeExplorer] resolved filter client-side result', {
+      filterId: filterField.id,
+      selectedSpeciesUid: String(selectedFilterValues[filterField.id] || '').trim(),
+      mainTargetFieldUsed:
+        targetFieldByFilterId[filterField.id] ||
+        resolveFilterTargetField(filterField, structureFieldMap),
+      finalRecordCountAfterFilter: filteredRecords.length,
+    })
+  })
+
+  return filteredRecords
 }
 
 const buildTextEqualityClause = (fieldName: string, value: string): string => {
@@ -1228,6 +1611,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
   const [selectedFilterValues, setSelectedFilterValues] = useState<{
     [key: string]: string
   }>({})
+  const [relatedFilterOptionsById, setRelatedFilterOptionsById] = useState<{
+    [key: string]: FilterOption[]
+  }>({})
   const [filterSearchValues, setFilterSearchValues] = useState<{
     [key: string]: string
   }>({})
@@ -1253,6 +1639,8 @@ const Widget = (props: AllWidgetProps<Config>) => {
   const lastAutoScrolledFeatureUidRef = useRef('')
   const featureAttributeRequestIdRef = useRef(0)
   const relatedSummaryRequestIdRef = useRef(0)
+  const relatedFilterOptionsRequestIdRef = useRef(0)
+  const mapFilterRequestIdRef = useRef(0)
   const findMatchingJimuLayerViewRef = useRef<() => any | null>(() => null)
   const selectFeatureRef = useRef<(feature_uid: string) => void>(() => {})
   const clearSelectedFeatureRef = useRef<() => void>(() => {})
@@ -1262,11 +1650,27 @@ const Widget = (props: AllWidgetProps<Config>) => {
   const configuredRelatedSourceKeys = getRelatedSourceKeysFromFieldMap(
     structureFieldMap,
   )
-  const summaryAttributeViewUseDataSource =
-    props.useDataSources && props.useDataSources.length > 1
-      ? props.useDataSources[1]
+  const relatedSourceKeyIndexMap = getRelatedSourceKeyIndexMap(structureFieldMap)
+  // Experience Builder datasource slot assumptions:
+  // useDataSources[0] = main tree datasource
+  // useDataSources[1..] = configured related/lookup sources in first-seen key order
+  const getUseDataSourceAtIndex = (index: number) => {
+    return props.useDataSources && props.useDataSources.length > index
+      ? props.useDataSources[index]
       : null
-  const hasStockViewRelatedDataSource = !!summaryAttributeViewUseDataSource
+  }
+  const configuredRelatedUseDataSources = configuredRelatedSourceKeys.map((sourceKey) => {
+    const dataSourceIndex = relatedSourceKeyIndexMap[sourceKey]
+
+    return {
+      sourceKey,
+      dataSourceIndex,
+      useDataSource: getUseDataSourceAtIndex(dataSourceIndex),
+    }
+  })
+  const hasConfiguredRelatedDataSource = configuredRelatedUseDataSources.some((entry) => {
+    return !!entry.useDataSource
+  })
   const rawWidgetTitle = props.config?.widgetTitle
   const rawWidgetSubtitle = props.config?.widgetSubtitle
   const configuredWidgetTitle = String(rawWidgetTitle || '').trim()
@@ -1565,23 +1969,27 @@ const Widget = (props: AllWidgetProps<Config>) => {
     setIsolatedTopLevelValues([])
   }
 
-  const setConfiguredFilterValue = (filterId: string, value: string) => {
+  const setConfiguredFilterValue = (
+    filterField: ConfiguredFilterField,
+    value: string,
+    label?: string,
+  ) => {
     setSelectedFilterValues((previous) => {
       return {
         ...previous,
-        [filterId]: value,
+        [filterField.id]: value,
       }
     })
 
     setFilterSearchValues((previous) => {
       return {
         ...previous,
-        [filterId]: value,
+        [filterField.id]: label || value,
       }
     })
 
     setOpenFilterIds((previous) => {
-      return previous.filter((id) => id !== filterId)
+      return previous.filter((id) => id !== filterField.id)
     })
   }
 
@@ -1696,7 +2104,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
     }
 
     const records = getLoadedRecordsFromDataSource(dataSource)
-    const filteredRecords = getFilteredRecords(
+    const mainSourceFilteredRecords = getMainSourceFilteredRecords(
       records,
       getFilteredHierarchyFields(structureFieldMap),
       selectedFilterValues,
@@ -1704,10 +2112,23 @@ const Widget = (props: AllWidgetProps<Config>) => {
 
     const requestId = relatedSummaryRequestIdRef.current + 1
     relatedSummaryRequestIdRef.current = requestId
+    let filteredRecords = mainSourceFilteredRecords
 
     let relatedSummaryValuesByFeatureUid: RelatedSummaryValuesByFeatureUid = {}
 
     try {
+      filteredRecords = await getRelatedBreakdownFilteredRecords(
+        mainSourceFilteredRecords,
+        getFilteredHierarchyFields(structureFieldMap),
+        selectedFilterValues,
+        relatedDataSourceByKey,
+        structureFieldMap,
+      )
+
+      if (relatedSummaryRequestIdRef.current !== requestId) {
+        return
+      }
+
       relatedSummaryValuesByFeatureUid =
         await queryRelatedSummaryValuesByFeatureUid(
           filteredRecords,
@@ -2073,6 +2494,70 @@ const Widget = (props: AllWidgetProps<Config>) => {
   ])
 
   useEffect(() => {
+    if (!structureFieldMap) {
+      setRelatedFilterOptionsById({})
+      return
+    }
+
+    const configuredFilters = getFilteredHierarchyFields(structureFieldMap)
+    const relatedBreakdownFilters = configuredFilters.filter((filterField) => {
+      return filterField.source !== 'direct'
+    })
+
+    if (relatedBreakdownFilters.length === 0) {
+      setRelatedFilterOptionsById({})
+      return
+    }
+
+    const requestId = relatedFilterOptionsRequestIdRef.current + 1
+    relatedFilterOptionsRequestIdRef.current = requestId
+
+    const loadRelatedFilterOptions = async () => {
+      try {
+        const settledResults = await Promise.allSettled(
+          relatedBreakdownFilters.map(async (filterField) => {
+            return {
+              filterId: filterField.id,
+              options: await queryRelatedFilterOptions(
+                filterField,
+                relatedDataSourceByKey,
+              ),
+            }
+          }),
+        )
+
+        if (relatedFilterOptionsRequestIdRef.current !== requestId) {
+          return
+        }
+
+        const nextOptionsById: { [key: string]: FilterOption[] } = {}
+
+        settledResults.forEach((settledResult, index) => {
+          const filterField = relatedBreakdownFilters[index]
+
+          if (settledResult.status !== 'fulfilled') {
+            nextOptionsById[filterField.id] = []
+            return
+          }
+
+          nextOptionsById[settledResult.value.filterId] = settledResult.value.options
+        })
+
+        setRelatedFilterOptionsById(nextOptionsById)
+      } catch (error) {
+        if (relatedFilterOptionsRequestIdRef.current !== requestId) {
+          return
+        }
+
+        console.warn('Failed to load related breakdown filter options.', error)
+        setRelatedFilterOptionsById({})
+      }
+    }
+
+    void loadRelatedFilterOptions()
+  }, [relatedDataSourceByKey, props.config?.fieldMapJson])
+
+  useEffect(() => {
     const previousIsolateLayerView = activeIsolateLayerViewRef.current
 
     if (previousIsolateLayerView) {
@@ -2097,56 +2582,105 @@ const Widget = (props: AllWidgetProps<Config>) => {
       return
     }
 
-    const whereParts: string[] = []
-    const topLevelField = structureFieldMap.hierarchyFields[0]
+    const requestId = mapFilterRequestIdRef.current + 1
+    mapFilterRequestIdRef.current = requestId
 
-    if (topLevelField && isolatedTopLevelValues.length > 0) {
-      const topLevelFieldName = getLayerFieldName(
-        jsApiLayer,
-        topLevelField.fieldName,
-      )
-      const escapedValues = isolatedTopLevelValues.map((value) => {
-        return `'${escapeSqlValue(value)}'`
-      })
+    const applyMapFilter = async () => {
+      const whereParts: string[] = []
+      const topLevelField = structureFieldMap.hierarchyFields[0]
 
-      whereParts.push(`${topLevelFieldName} IN (${escapedValues.join(', ')})`)
-    }
+      if (topLevelField && isolatedTopLevelValues.length > 0) {
+        const topLevelFieldName = getLayerFieldName(
+          jsApiLayer,
+          topLevelField.fieldName,
+        )
+        const escapedValues = isolatedTopLevelValues.map((value) => {
+          return `'${escapeSqlValue(value)}'`
+        })
 
-    configuredFilterFields.forEach((filterField) => {
-      const selectedValue = String(
-        selectedFilterValues[filterField.id] || '',
-      ).trim()
+        whereParts.push(`${topLevelFieldName} IN (${escapedValues.join(', ')})`)
+      }
 
-      if (selectedValue === '') {
+      for (const filterField of configuredFilterFields) {
+        const selectedValue = String(
+          selectedFilterValues[filterField.id] || '',
+        ).trim()
+
+        if (selectedValue === '') {
+          continue
+        }
+
+        if (filterField.source === 'direct') {
+          const layerFieldName = getLayerFieldName(
+            jsApiLayer,
+            filterField.fieldName,
+          )
+
+          whereParts.push(buildTextEqualityClause(layerFieldName, selectedValue))
+          continue
+        }
+
+        const resolvedFilter = await resolveFilterJoinValues(
+          filterField,
+          selectedValue,
+          relatedDataSourceByKey,
+          structureFieldMap,
+        )
+
+        if (mapFilterRequestIdRef.current !== requestId) {
+          return
+        }
+
+        const layerFieldName = getLayerFieldName(
+          jsApiLayer,
+          resolvedFilter.targetField,
+        )
+
+        if (resolvedFilter.resolvedJoinValues.length === 0) {
+          whereParts.push('1 = 0')
+        } else {
+          const escapedValues = resolvedFilter.resolvedJoinValues.map((value) => {
+            return `'${escapeSqlValue(value)}'`
+          })
+
+          whereParts.push(`${layerFieldName} IN (${escapedValues.join(', ')})`)
+        }
+
+        console.log('[TransactionDataSetTreeExplorer] resolved filter map expression', {
+          filterId: filterField.id,
+          selectedSpeciesUid: selectedValue,
+          mainTargetFieldUsed: resolvedFilter.targetField,
+          finalMainFilterWhere:
+            whereParts.length > 0 ? whereParts.join(' AND ') : '',
+        })
+      }
+
+      if (mapFilterRequestIdRef.current !== requestId) {
         return
       }
 
-      const layerFieldName = getLayerFieldName(
-        jsApiLayer,
-        filterField.fieldName,
-      )
-
-      whereParts.push(buildTextEqualityClause(layerFieldName, selectedValue))
-    })
-
-    if (whereParts.length === 0) {
-      return
-    }
-
-    try {
-      jsApiLayerView.filter = {
-        where: whereParts.join(' AND '),
+      if (whereParts.length === 0) {
+        return
       }
 
-      activeIsolateLayerViewRef.current = jsApiLayerView
-    } catch (error) {
-      console.warn('Failed to apply tree viewer filter', error)
+      try {
+        jsApiLayerView.filter = {
+          where: whereParts.join(' AND '),
+        }
+
+        activeIsolateLayerViewRef.current = jsApiLayerView
+      } catch (error) {
+        console.warn('Failed to apply tree viewer filter', error)
+      }
     }
+
+    void applyMapFilter()
   }, [
     isolatedTopLevelValues,
     selectedFilterValues,
     jimuMapView,
     activeFeatureDs,
+    relatedDataSourceByKey,
     props.config?.fieldMapJson,
   ])
 
@@ -2327,30 +2861,40 @@ const Widget = (props: AllWidgetProps<Config>) => {
         {() => null}
       </DataSourceComponent>
 
-      {summaryAttributeViewUseDataSource && configuredRelatedSourceKeys.includes('stockView') && (
-        <DataSourceComponent
-          useDataSource={summaryAttributeViewUseDataSource}
-          widgetId={props.id}
-          onDataSourceCreated={(dataSource: DataSource) => {
-            setRelatedDataSourceForKey('stockView', dataSource)
-            setRelatedDataSourceError('')
+      {configuredRelatedUseDataSources.map((relatedUseDataSource) => {
+        if (!relatedUseDataSource.useDataSource) {
+          return null
+        }
 
-            if (activeFeatureDs) {
-              const fieldNames = updateAvailableFieldNamesFromDataSource(activeFeatureDs)
+        return (
+          <DataSourceComponent
+            key={relatedUseDataSource.sourceKey}
+            useDataSource={relatedUseDataSource.useDataSource}
+            widgetId={props.id}
+            onDataSourceCreated={(dataSource: DataSource) => {
+              // Source keys from the field map drive which configured datasource
+              // slot each helper source binds to at runtime.
+              setRelatedDataSourceForKey(relatedUseDataSource.sourceKey, dataSource)
+              setRelatedDataSourceError('')
 
-              refreshStructureHierarchyFromDataSource(activeFeatureDs, fieldNames)
-            }
-          }}
-          onCreateDataSourceFailed={(error) => {
-            setRelatedDataSourceForKey('stockView', null)
-            setRelatedDataSourceError(
-              error?.message || 'Failed to connect to the Summary Attribute View Table.',
-            )
-          }}
-        >
-          {() => null}
-        </DataSourceComponent>
-      )}
+              if (activeFeatureDs) {
+                const fieldNames = updateAvailableFieldNamesFromDataSource(activeFeatureDs)
+
+                refreshStructureHierarchyFromDataSource(activeFeatureDs, fieldNames)
+              }
+            }}
+            onCreateDataSourceFailed={(error) => {
+              setRelatedDataSourceForKey(relatedUseDataSource.sourceKey, null)
+              setRelatedDataSourceError(
+                error?.message ||
+                  `Failed to connect to the configured related datasource ${relatedUseDataSource.sourceKey}.`,
+              )
+            }}
+          >
+            {() => null}
+          </DataSourceComponent>
+        )
+      })}
 
       {props.useMapWidgetIds && props.useMapWidgetIds.length > 0 && (
         <JimuMapViewComponent
@@ -2361,9 +2905,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
         />
       )}
 
-      <div
+        <div
         style={CONTENT_STYLE}
-        data-stock-view-configured={hasStockViewRelatedDataSource ? 'true' : 'false'}
+        data-related-source-configured={hasConfiguredRelatedDataSource ? 'true' : 'false'}
       >
         <div style={HEADER_STYLE}>
           <h3 style={HEADER_TITLE_STYLE}>{widgetTitle}</h3>
@@ -2378,10 +2922,15 @@ const Widget = (props: AllWidgetProps<Config>) => {
           <div style={FILTER_ROW_STYLE}>
             {configuredFilterFields.map((filterField) => {
               const records = getLoadedRecordsFromDataSource(activeFeatureDs)
-              const options = getFilterOptionsFromRecords(records, filterField)
+              const options = filterField.source !== 'direct'
+                ? (relatedFilterOptionsById[filterField.id] || [])
+                : getFilterOptionsFromRecords(records, filterField)
               const selectedValue = selectedFilterValues[filterField.id] || ''
+              const selectedOption = options.find((option) => {
+                return option.value === selectedValue
+              })
               const searchValue =
-                filterSearchValues[filterField.id] ?? selectedValue
+                filterSearchValues[filterField.id] ?? selectedOption?.label ?? selectedValue
               const visibleOptions = getVisibleFilterOptions(
                 options,
                 searchValue,
@@ -2419,13 +2968,17 @@ const Widget = (props: AllWidgetProps<Config>) => {
                             visibleOptions.length === 1
                           ) {
                             setConfiguredFilterValue(
-                              filterField.id,
-                              visibleOptions[0],
+                              filterField,
+                              visibleOptions[0].value,
+                              visibleOptions[0].label,
                             )
                           }
 
                           if (event.key === 'Escape') {
-                            setFilterSearchValue(filterField.id, selectedValue)
+                            setFilterSearchValue(
+                              filterField.id,
+                              selectedOption?.label ?? selectedValue,
+                            )
                             closeConfiguredFilter(filterField.id)
                           }
                         }}
@@ -2439,25 +2992,26 @@ const Widget = (props: AllWidgetProps<Config>) => {
                             </li>
                           )}
 
-                          {visibleOptions.map((optionValue) => {
+                          {visibleOptions.map((option) => {
                             return (
-                              <li key={optionValue}>
+                              <li key={option.value}>
                                 <button
                                   type="button"
                                   style={{
                                     ...FILTER_OPTION_BUTTON_STYLE,
                                     fontWeight:
-                                      optionValue === selectedValue ? 700 : 400,
+                                      option.value === selectedValue ? 700 : 400,
                                   }}
                                   onMouseDown={(event) => {
                                     event.preventDefault()
                                     setConfiguredFilterValue(
-                                      filterField.id,
-                                      optionValue,
+                                      filterField,
+                                      option.value,
+                                      option.label,
                                     )
                                   }}
                                 >
-                                  {optionValue}
+                                  {option.label}
                                 </button>
                               </li>
                             )

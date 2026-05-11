@@ -73,6 +73,13 @@ const Setting = (props: AllWidgetSettingProps<Config>) => {
     })
   }
 
+  const onLookupOptionsDataSourceChange = (useDataSources: any) => {
+    props.onSettingChange({
+      id: props.id,
+      useDataSources: replaceUseDataSourceAtIndex(props.useDataSources, 2, useDataSources),
+    })
+  }
+
   const onMapWidgetSelected = (useMapWidgetIds: string[]) => {
     props.onSettingChange({
       id: props.id,
@@ -105,7 +112,7 @@ const Setting = (props: AllWidgetSettingProps<Config>) => {
     <div className="p-3">
       <h4>Active Feature Explorer Settings</h4>
 
-      <p>Select the active feature class data source, optional summary table, target map widget, and field map JSON.</p>
+      <p>Select the main tree datasource, the related/summary datasource, the lookup/options datasource, the target map widget, and the field map JSON.</p>
 
       <div className="mb-4">
         <div className="mb-2"><strong>Active Feature Class data source</strong></div>
@@ -127,6 +134,18 @@ const Setting = (props: AllWidgetSettingProps<Config>) => {
           types={Immutable([DataSourceTypes.FeatureLayer])}
           useDataSources={Immutable(getSingleUseDataSource(props.useDataSources, 1))}
           onChange={onSummaryAttributeViewDataSourceChange}
+          widgetId={props.id}
+        />
+      </div>
+
+      <div className="mb-4">
+        <div className="mb-2"><strong>Lookup / filter options data source</strong></div>
+
+        <DataSourceSelector
+          mustUseDataSource
+          types={Immutable([DataSourceTypes.FeatureLayer])}
+          useDataSources={Immutable(getSingleUseDataSource(props.useDataSources, 2))}
+          onChange={onLookupOptionsDataSourceChange}
           widgetId={props.id}
         />
       </div>
