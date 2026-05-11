@@ -3,100 +3,87 @@ import type { AllWidgetSettingProps } from 'jimu-for-builder'
 import { DataSourceSelector } from 'jimu-ui/advanced/data-source-selector'
 import { MapWidgetSelector } from 'jimu-ui/advanced/setting-components'
 import { TextArea } from 'jimu-ui'
-import type { Config, RelatedDataSourceConfig } from '../config'
+import type { Config } from '../config'
 
-const STOCK_VIEW_KEY = 'stockView'
-const STOCK_VIEW_LABEL = 'Summary Attribute View Table'
-
-const getPlainArray = <T,>(value: any): T[] => {
-  if (!value) {
+const getUseDataSourcesArray = (useDataSources: any): UseDataSource[] => {
+  if (!useDataSources) {
     return []
   }
 
-  if (Array.isArray(value)) {
-    return value
+  if (Array.isArray(useDataSources)) {
+    return useDataSources
   }
 
-  if (typeof value.asMutable === 'function') {
-    return value.asMutable({ deep: true }) as T[]
+  if (typeof useDataSources.asMutable === 'function') {
+    return useDataSources.asMutable({ deep: true }) as UseDataSource[]
   }
 
-  if (typeof value[Symbol.iterator] === 'function') {
-    return Array.from(value) as T[]
+  if (typeof useDataSources[Symbol.iterator] === 'function') {
+    return Array.from(useDataSources) as UseDataSource[]
   }
 
   return []
 }
 
-const getRelatedDataSourcesArray = (config: Config | undefined): RelatedDataSourceConfig[] => {
-  return getPlainArray<RelatedDataSourceConfig>((config as any)?.relatedDataSources)
+const getSingleUseDataSource = (useDataSources: any, index: number): UseDataSource[] => {
+  const values = getUseDataSourcesArray(useDataSources)
+  const selected = values[index]
+
+  if (!selected) {
+    return []
+  }
+
+  return [selected]
+}
+
+const replaceUseDataSourceAtIndex = (
+  existingUseDataSources: any,
+  index: number,
+  selectedUseDataSourcesInput: any,
+): UseDataSource[] => {
+  const nextUseDataSources = getUseDataSourcesArray(existingUseDataSources)
+  const selectedUseDataSources = getUseDataSourcesArray(selectedUseDataSourcesInput)
+  const selectedUseDataSource = selectedUseDataSources[0]
+
+  if (selectedUseDataSource) {
+    nextUseDataSources[index] = selectedUseDataSource
+  } else {
+    nextUseDataSources[index] = undefined as unknown as UseDataSource
+  }
+
+  while (nextUseDataSources.length > 0 && !nextUseDataSources[nextUseDataSources.length - 1]) {
+    nextUseDataSources.pop()
+  }
+
+  return nextUseDataSources.filter((useDataSource) => !!useDataSource)
 }
 
 const Setting = (props: AllWidgetSettingProps<Config>) => {
-  const onDataSourceChange = (useDataSources: UseDataSource[]) => {
+  const onActiveFeatureDataSourceChange = (useDataSources: any) => {
     props.onSettingChange({
       id: props.id,
-      useDataSources
+      useDataSources: replaceUseDataSourceAtIndex(props.useDataSources, 0, useDataSources),
+    })
+  }
+
+  const onSummaryAttributeViewDataSourceChange = (useDataSources: any) => {
+    props.onSettingChange({
+      id: props.id,
+      useDataSources: replaceUseDataSourceAtIndex(props.useDataSources, 1, useDataSources),
     })
   }
 
   const onMapWidgetSelected = (useMapWidgetIds: string[]) => {
     props.onSettingChange({
       id: props.id,
-      useMapWidgetIds
+      useMapWidgetIds,
     })
   }
 
   const onFieldMapJsonChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     props.onSettingChange({
       id: props.id,
-      config: props.config.set('fieldMapJson', event.target.value)
-    })
-  }
-
-  const getSummaryAttributeViewUseDataSources = () => {
-    const relatedDataSources = getRelatedDataSourcesArray(props.config)
-    const summaryAttributeView = relatedDataSources.find((relatedDataSource) => {
-      return relatedDataSource.key === STOCK_VIEW_KEY && String(relatedDataSource.dataSourceId || '').trim() !== ''
-    })
-
-    if (!summaryAttributeView) {
-      return Immutable([])
-    }
-
-    return Immutable([
-      {
-        dataSourceId: summaryAttributeView.dataSourceId
-      } as UseDataSource
-    ])
-  }
-
-  const onSummaryAttributeViewDataSourceChange = (incomingUseDataSources: any) => {
-    const useDataSources = getPlainArray<UseDataSource>(incomingUseDataSources)
-    const selectedDataSource = useDataSources[0]
-    const selectedDataSourceId = String(selectedDataSource?.dataSourceId || '').trim()
-
-    const existingRelatedDataSources = getRelatedDataSourcesArray(props.config).filter((relatedDataSource) => {
-      return relatedDataSource.key !== STOCK_VIEW_KEY
-    })
-
-    const nextRelatedDataSources = selectedDataSourceId === ''
-      ? existingRelatedDataSources
-      : [
-        ...existingRelatedDataSources,
-        {
-          key: STOCK_VIEW_KEY,
-          label: STOCK_VIEW_LABEL,
-          dataSourceId: selectedDataSourceId
-        }
-      ]
-
-    props.onSettingChange({
-      id: props.id,
-      config: props.config.set(
-        'relatedDataSources',
-        nextRelatedDataSources.length > 0 ? Immutable(nextRelatedDataSources) : undefined
-      )
+      config: props.config.set('fieldMapJson', event.target.value),
     })
   }
 
@@ -104,7 +91,7 @@ const Setting = (props: AllWidgetSettingProps<Config>) => {
     <div className="p-3">
       <h4>Active Feature Explorer Settings</h4>
 
-      <p>Select the active feature class data source, summary attribute view table, target map widget, and field map JSON.</p>
+      <p>Select the active feature class data source, optional summary table, target map widget, and field map JSON.</p>
 
       <div className="mb-4">
         <div className="mb-2"><strong>Active Feature Class data source</strong></div>
@@ -112,8 +99,8 @@ const Setting = (props: AllWidgetSettingProps<Config>) => {
         <DataSourceSelector
           mustUseDataSource
           types={Immutable([DataSourceTypes.FeatureLayer])}
-          useDataSources={props.useDataSources}
-          onChange={onDataSourceChange}
+          useDataSources={Immutable(getSingleUseDataSource(props.useDataSources, 0))}
+          onChange={onActiveFeatureDataSourceChange}
           widgetId={props.id}
         />
       </div>
@@ -124,7 +111,7 @@ const Setting = (props: AllWidgetSettingProps<Config>) => {
         <DataSourceSelector
           mustUseDataSource
           types={Immutable([DataSourceTypes.FeatureLayer])}
-          useDataSources={getSummaryAttributeViewUseDataSources()}
+          useDataSources={Immutable(getSingleUseDataSource(props.useDataSources, 1))}
           onChange={onSummaryAttributeViewDataSourceChange}
           widgetId={props.id}
         />
@@ -152,8 +139,7 @@ const Setting = (props: AllWidgetSettingProps<Config>) => {
     {
       "key": "zone",
       "fieldName": "zone",
-      "label": "Zone",
-      "filter": true
+      "label": "Zone"
     },
     {
       "key": "bed",

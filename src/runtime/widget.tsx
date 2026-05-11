@@ -11,12 +11,14 @@ import {
   parseStructureFieldMap,
   validateFieldMapAgainstAvailableFields,
   type FeatureAttributeConfig,
+  type RelatedSummaryConfig,
   type StructureFieldMap,
 } from './lib/field-map'
 import {
   buildStructureHierarchyFromRecords,
   getExpandableNodeKeys,
   getNodePathKeysForFeatureUid,
+  type RelatedSummaryValuesByFeatureUid,
   type StructureNode,
 } from './lib/structure-model'
 import {
@@ -250,6 +252,14 @@ interface ConfiguredFilterField {
   fieldName: string
 }
 
+interface RelatedDataSourceRuntimeMap {
+  [key: string]: DataSource
+}
+
+interface RelatedSummaryDefinition extends RelatedSummaryConfig {
+  hierarchyFieldKey: string
+}
+
 interface ViewEventHandle {
   remove: () => void
 }
@@ -258,18 +268,31 @@ interface HighlightHandle {
   remove: () => void
 }
 
-const getRelatedDataSourcesArray = (config: Config | undefined): any[] => {
-  const relatedDataSources = (config as any)?.relatedDataSources
+const getRelatedSummaryDefinitions = (fieldMap: StructureFieldMap): RelatedSummaryDefinition[] => {
+  return fieldMap.hierarchyFields.flatMap((hierarchyField) => {
+    const relatedSummaries = Array.isArray(hierarchyField.relatedSummaries)
+      ? hierarchyField.relatedSummaries
+      : []
 
-  if (Array.isArray(relatedDataSources)) {
-    return relatedDataSources
+    return relatedSummaries.map((summary) => {
+      return {
+        ...summary,
+        hierarchyFieldKey: hierarchyField.key,
+      }
+    })
+  })
+}
+
+const getRelatedSourceKeysFromFieldMap = (fieldMap: StructureFieldMap | null): string[] => {
+  if (!fieldMap) {
+    return []
   }
 
-  if (relatedDataSources && typeof relatedDataSources[Symbol.iterator] === 'function') {
-    return Array.from(relatedDataSources)
-  }
+  const keys = getRelatedSummaryDefinitions(fieldMap).map((summary) => {
+    return summary.relatedSourceKey
+  })
 
-  return []
+  return Array.from(new Set(keys))
 }
 
 const getFeatureUidsFromNodes = (nodes: StructureNode[]): string[] => {
@@ -369,6 +392,176 @@ const getRecordFilterValue = (record: any, fieldName: string): string => {
   return String(value).trim()
 }
 
+const getRecordRawValue = (record: any, fieldName: string): unknown => {
+  const data = record && typeof record.getData === 'function' ? record.getData() : {}
+
+  if (Object.prototype.hasOwnProperty.call(data, fieldName)) {
+    return data[fieldName]
+  }
+
+  const requestedFieldName = fieldName.toLowerCase()
+  const matchingKey = Object.keys(data || {}).find((key) => {
+    const lowerKey = key.toLowerCase()
+
+    return (
+      lowerKey === requestedFieldName ||
+      lowerKey.endsWith(`.${requestedFieldName}`)
+    )
+  })
+
+  if (!matchingKey) {
+    return undefined
+  }
+
+  return data[matchingKey]
+}
+
+const getQueryRecords = (queryResult: any): any[] => {
+  if (Array.isArray(queryResult)) {
+    return queryResult
+  }
+
+  if (Array.isArray(queryResult?.records)) {
+    return queryResult.records
+  }
+
+  if (Array.isArray(queryResult?.features)) {
+    return queryResult.features
+  }
+
+  return []
+}
+
+const buildTextInClause = (fieldName: string, values: string[]): string => {
+  const cleanValues = values
+    .map((value) => String(value || '').trim())
+    .filter((value) => value !== '')
+
+  if (cleanValues.length === 0) {
+    return '1 = 0'
+  }
+
+  const escapedValues = cleanValues.map((value) => {
+    return `'${escapeSqlValue(value)}'`
+  })
+
+  return `${fieldName} IN (${escapedValues.join(', ')})`
+}
+
+const chunkValues = (values: string[], chunkSize: number): string[][] => {
+  const chunks: string[][] = []
+
+  for (let index = 0; index < values.length; index += chunkSize) {
+    chunks.push(values.slice(index, index + chunkSize))
+  }
+
+  return chunks
+}
+
+const queryRelatedSummaryValuesByFeatureUid = async (
+  mainRecords: any[],
+  fieldMap: StructureFieldMap,
+  relatedDataSourceByKey: RelatedDataSourceRuntimeMap,
+): Promise<RelatedSummaryValuesByFeatureUid> => {
+  const summaryDefinitions = getRelatedSummaryDefinitions(fieldMap)
+  const summaryValuesByFeatureUid: RelatedSummaryValuesByFeatureUid = {}
+
+  if (summaryDefinitions.length === 0) {
+    return summaryValuesByFeatureUid
+  }
+
+  for (const summary of summaryDefinitions) {
+    if (summary.operation !== 'sum') {
+      continue
+    }
+
+    const relatedDataSource = relatedDataSourceByKey[summary.relatedSourceKey]
+
+    if (!relatedDataSource || typeof (relatedDataSource as any).query !== 'function') {
+      continue
+    }
+
+    const joinValueToFeatureUids: { [joinValue: string]: string[] } = {}
+
+    mainRecords.forEach((record) => {
+      const featureUid = getRecordFilterValue(
+        record,
+        fieldMap.identityFields.feature_uid.fieldName,
+      )
+      const joinValue = getRecordFilterValue(record, summary.joinField)
+
+      if (featureUid === '' || joinValue === '') {
+        return
+      }
+
+      if (!joinValueToFeatureUids[joinValue]) {
+        joinValueToFeatureUids[joinValue] = []
+      }
+
+      if (!joinValueToFeatureUids[joinValue].includes(featureUid)) {
+        joinValueToFeatureUids[joinValue].push(featureUid)
+      }
+    })
+
+    const joinValues = Object.keys(joinValueToFeatureUids)
+    const statisticFieldName = `${summary.key}_sum`
+
+    for (const joinValueChunk of chunkValues(joinValues, 75)) {
+      const query = {
+        where: buildTextInClause(summary.relatedJoinField, joinValueChunk),
+        outFields: [summary.relatedJoinField],
+        returnGeometry: false,
+        groupByFieldsForStatistics: [summary.relatedJoinField],
+        outStatistics: [
+          {
+            statisticType: 'sum',
+            onStatisticField: summary.fieldName,
+            outStatisticFieldName: statisticFieldName,
+          },
+        ],
+        pageSize: joinValueChunk.length,
+      }
+
+      const queryResult = await (relatedDataSource as any).query(query)
+      const relatedRecords = getQueryRecords(queryResult)
+
+      relatedRecords.forEach((relatedRecord) => {
+        const relatedJoinValue = getRecordFilterValue(
+          relatedRecord,
+          summary.relatedJoinField,
+        )
+        const matchingFeatureUids = joinValueToFeatureUids[relatedJoinValue] || []
+
+        if (matchingFeatureUids.length === 0) {
+          return
+        }
+
+        const rawValue = getRecordRawValue(relatedRecord, statisticFieldName)
+        const numericValue = typeof rawValue === 'number' ? rawValue : Number(rawValue)
+
+        if (Number.isNaN(numericValue)) {
+          return
+        }
+
+        matchingFeatureUids.forEach((featureUid) => {
+          if (!summaryValuesByFeatureUid[featureUid]) {
+            summaryValuesByFeatureUid[featureUid] = {}
+          }
+
+          const existingValue = Number(
+            summaryValuesByFeatureUid[featureUid][summary.key] || 0,
+          )
+
+          summaryValuesByFeatureUid[featureUid][summary.key] =
+            existingValue + numericValue
+        })
+      })
+    }
+  }
+
+  return summaryValuesByFeatureUid
+}
+
 const getFilterOptionsFromRecords = (
   records: any[],
   filterField: ConfiguredFilterField,
@@ -439,6 +632,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
   const [activeFeatureDs, setActiveFeatureDs] = useState<DataSource | null>(
     null,
   )
+  const [relatedDataSourceByKey, setRelatedDataSourceByKey] =
+    useState<RelatedDataSourceRuntimeMap>({})
+  const [relatedDataSourceError, setRelatedDataSourceError] = useState('')
   const [jimuMapView, setJimuMapView] = useState<JimuMapView | null>(null)
   const [isLoadingFeatures, setIsLoadingFeatures] = useState(false)
   const [loadError, setLoadError] = useState('')
@@ -477,16 +673,21 @@ const Widget = (props: AllWidgetProps<Config>) => {
   const featureRowRefs = useRef<{ [key: string]: HTMLDivElement | null }>({})
   const lastAutoScrolledFeatureUidRef = useRef('')
   const featureAttributeRequestIdRef = useRef(0)
+  const relatedSummaryRequestIdRef = useRef(0)
   const findMatchingJimuLayerViewRef = useRef<() => any | null>(() => null)
   const selectFeatureRef = useRef<(feature_uid: string) => void>(() => {})
   const clearSelectedFeatureRef = useRef<() => void>(() => {})
 
   const fieldMapParseResult = parseStructureFieldMap(props.config?.fieldMapJson)
   const structureFieldMap = fieldMapParseResult.fieldMap
-  const relatedDataSources = getRelatedDataSourcesArray(props.config)
-  const hasStockViewRelatedDataSource = relatedDataSources.some((relatedDataSource) => {
-    return relatedDataSource.key === 'stockView'
-  })
+  const configuredRelatedSourceKeys = getRelatedSourceKeysFromFieldMap(
+    structureFieldMap,
+  )
+  const summaryAttributeViewUseDataSource =
+    props.useDataSources && props.useDataSources.length > 1
+      ? props.useDataSources[1]
+      : null
+  const hasStockViewRelatedDataSource = !!summaryAttributeViewUseDataSource
 
   const fieldValidationResult = structureFieldMap
     ? validateFieldMapAgainstAvailableFields(
@@ -761,7 +962,21 @@ const Widget = (props: AllWidgetProps<Config>) => {
     setRecordCount(getLoadedRecordCountFromDataSource(dataSource))
   }
 
-  const refreshStructureHierarchyFromDataSource = (
+  const setRelatedDataSourceForKey = (key: string, dataSource: DataSource | null) => {
+    setRelatedDataSourceByKey((previous) => {
+      const next = { ...previous }
+
+      if (dataSource) {
+        next[key] = dataSource
+      } else {
+        delete next[key]
+      }
+
+      return next
+    })
+  }
+
+  const refreshStructureHierarchyFromDataSource = async (
     dataSource: DataSource,
     fieldNames: string[],
   ) => {
@@ -786,9 +1001,38 @@ const Widget = (props: AllWidgetProps<Config>) => {
       getFilteredHierarchyFields(structureFieldMap),
       selectedFilterValues,
     )
+
+    const requestId = relatedSummaryRequestIdRef.current + 1
+    relatedSummaryRequestIdRef.current = requestId
+
+    let relatedSummaryValuesByFeatureUid: RelatedSummaryValuesByFeatureUid = {}
+
+    try {
+      relatedSummaryValuesByFeatureUid =
+        await queryRelatedSummaryValuesByFeatureUid(
+          filteredRecords,
+          structureFieldMap,
+          relatedDataSourceByKey,
+        )
+
+      setRelatedDataSourceError('')
+    } catch (error) {
+      console.warn('Failed to query related summary values.', error)
+      setRelatedDataSourceError(
+        error instanceof Error
+          ? error.message
+          : 'Failed to query the Summary Attribute View Table.',
+      )
+    }
+
+    if (relatedSummaryRequestIdRef.current !== requestId) {
+      return
+    }
+
     const hierarchy = buildStructureHierarchyFromRecords(
       filteredRecords,
       structureFieldMap,
+      relatedSummaryValuesByFeatureUid,
     )
     const availableExpandableNodeKeys = new Set(
       getExpandableNodeKeys(hierarchy),
@@ -1121,7 +1365,12 @@ const Widget = (props: AllWidgetProps<Config>) => {
 
     refreshRecordCountFromDataSource(activeFeatureDs)
     refreshStructureHierarchyFromDataSource(activeFeatureDs, fieldNames)
-  }, [selectedFilterValues, activeFeatureDs, props.config?.fieldMapJson])
+  }, [
+    selectedFilterValues,
+    activeFeatureDs,
+    relatedDataSourceByKey,
+    props.config?.fieldMapJson,
+  ])
 
   useEffect(() => {
     const previousIsolateLayerView = activeIsolateLayerViewRef.current
@@ -1351,6 +1600,8 @@ const Widget = (props: AllWidgetProps<Config>) => {
           setRecordCount(0)
           setAvailableFieldNames([])
           setStructureHierarchy([])
+          setRelatedDataSourceByKey({})
+          setRelatedDataSourceError('')
           setIsolatedTopLevelValues([])
           setSelectedFilterValues({})
           setFilterSearchValues({})
@@ -1367,6 +1618,31 @@ const Widget = (props: AllWidgetProps<Config>) => {
       >
         {() => null}
       </DataSourceComponent>
+
+      {summaryAttributeViewUseDataSource && configuredRelatedSourceKeys.includes('stockView') && (
+        <DataSourceComponent
+          useDataSource={summaryAttributeViewUseDataSource}
+          widgetId={props.id}
+          onDataSourceCreated={(dataSource: DataSource) => {
+            setRelatedDataSourceForKey('stockView', dataSource)
+            setRelatedDataSourceError('')
+
+            if (activeFeatureDs) {
+              const fieldNames = updateAvailableFieldNamesFromDataSource(activeFeatureDs)
+
+              refreshStructureHierarchyFromDataSource(activeFeatureDs, fieldNames)
+            }
+          }}
+          onCreateDataSourceFailed={(error) => {
+            setRelatedDataSourceForKey('stockView', null)
+            setRelatedDataSourceError(
+              error?.message || 'Failed to connect to the Summary Attribute View Table.',
+            )
+          }}
+        >
+          {() => null}
+        </DataSourceComponent>
+      )}
 
       {props.useMapWidgetIds && props.useMapWidgetIds.length > 0 && (
         <JimuMapViewComponent
@@ -1537,6 +1813,10 @@ const Widget = (props: AllWidgetProps<Config>) => {
 
         {selectionError !== '' && (
           <div style={MESSAGE_PANEL_STYLE}>{selectionError}</div>
+        )}
+
+        {relatedDataSourceError !== '' && (
+          <div style={MESSAGE_PANEL_STYLE}>{relatedDataSourceError}</div>
         )}
 
         {fieldValidationResult &&
