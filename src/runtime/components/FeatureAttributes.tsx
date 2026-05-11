@@ -17,13 +17,13 @@ interface FeatureAttributesProps
 const TREE_TOGGLE_STYLE = {
   background: 'none',
   border: 'none',
-  color: '#444',
+  color: '#607080',
   textDecoration: 'none',
   fontWeight: 700,
-  minWidth: '0.8rem',
-  width: '0.8rem',
+  minWidth: '1rem',
+  width: '1rem',
   padding: 0,
-  fontSize: '0.72rem',
+  fontSize: '0.8rem',
   lineHeight: 1,
   cursor: 'pointer'
 }
@@ -31,27 +31,60 @@ const TREE_TOGGLE_STYLE = {
 const ATTRIBUTE_BUTTON_STYLE = {
   background: 'none',
   border: 'none',
-  color: '#333',
+  color: '#32586b',
   padding: 0,
   cursor: 'pointer',
-  fontWeight: 600
+  fontWeight: 600,
+  fontSize: '0.88rem'
+}
+
+const ATTRIBUTE_GROUP_STYLE = {
+  marginTop: '0.45rem',
+  marginLeft: '1.5rem',
+  paddingLeft: '0.85rem',
+  borderLeft: '2px solid #dbe6ed'
 }
 
 const ATTRIBUTE_RECORD_STYLE = {
-  margin: '0.35rem 0 0.5rem 1rem',
-  padding: '0.45rem 0.6rem',
-  borderLeft: '2px solid #d6e7f2',
-  backgroundColor: '#fafafa',
-  borderRadius: '4px'
+  margin: '0.45rem 0 0.55rem 0',
+  padding: '0.6rem 0.75rem',
+  border: '1px solid #e2e9ee',
+  backgroundColor: '#fbfcfd',
+  borderRadius: '8px'
+}
+
+const ATTRIBUTE_ROW_STYLE = {
+  display: 'grid',
+  gridTemplateColumns: 'minmax(130px, 180px) minmax(0, 1fr)',
+  gap: '0.4rem 0.75rem',
+  alignItems: 'start' as const,
+  marginTop: '0.3rem'
+}
+
+const ATTRIBUTE_ROW_LABEL_STYLE = {
+  color: '#607080',
+  fontWeight: 700,
+  fontSize: '0.84rem'
+}
+
+const ATTRIBUTE_ROW_VALUE_STYLE = {
+  color: '#1c2733',
+  fontSize: '0.88rem',
+  lineHeight: 1.45
 }
 
 const MUTED_TEXT_STYLE = {
-  color: '#666',
+  color: '#607080',
+  fontSize: '0.88rem'
+}
+
+const ERROR_TEXT_STYLE = {
+  color: '#a12626',
   fontSize: '0.88rem'
 }
 
 const getTreeToggleIcon = (isExpanded: boolean): string => {
-  return isExpanded ? '▼' : '▶'
+  return isExpanded ? '-' : '+'
 }
 
 const FeatureAttributes = (props: FeatureAttributesProps) => {
@@ -61,7 +94,7 @@ const FeatureAttributes = (props: FeatureAttributesProps) => {
   }
 
   return (
-    <div style={{ marginTop: '0.35rem', marginLeft: '1rem' }}>
+    <div style={{ marginTop: '0.5rem', marginLeft: '0.25rem' }}>
       {props.featureAttributes.map((featureAttribute) => {
         const stateKey = getFeatureAttributeStateKey(props.feature_uid, featureAttribute.key)
         const isExpanded = props.expandedFeatureAttributeKeys.includes(stateKey)
@@ -70,37 +103,38 @@ const FeatureAttributes = (props: FeatureAttributesProps) => {
         const records = props.featureAttributeRecords[stateKey] || []
 
         return (
-          <div key={stateKey} style={{ marginBottom: '0.35rem' }}>
-            <button
-              type="button"
-              onClick={() => {
-                props.onToggleFeatureAttribute(props.feature_uid, featureAttribute)
-              }}
-              aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${featureAttribute.label}`}
-              style={TREE_TOGGLE_STYLE}
-            >
-              {getTreeToggleIcon(isExpanded)}
-            </button>
+          <div key={stateKey} style={{ marginBottom: '0.45rem' }}>
+            <div>
+              <button
+                type="button"
+                onClick={() => {
+                  props.onToggleFeatureAttribute(props.feature_uid, featureAttribute)
+                }}
+                aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${featureAttribute.label}`}
+                style={TREE_TOGGLE_STYLE}
+              >
+                {getTreeToggleIcon(isExpanded)}
+              </button>
 
-            <button
-              type="button"
-              onClick={() => {
-                props.onToggleFeatureAttribute(props.feature_uid, featureAttribute)
-              }}
-              style={ATTRIBUTE_BUTTON_STYLE}
-            >
-              {' '}
-              {featureAttribute.label}
-            </button>
+              <button
+                type="button"
+                onClick={() => {
+                  props.onToggleFeatureAttribute(props.feature_uid, featureAttribute)
+                }}
+                style={ATTRIBUTE_BUTTON_STYLE}
+              >
+                {featureAttribute.label}
+              </button>
+            </div>
 
             {isExpanded && (
-              <div>
+              <div style={ATTRIBUTE_GROUP_STYLE}>
                 {isLoading && (
                   <p style={MUTED_TEXT_STYLE}>Loading...</p>
                 )}
 
                 {!isLoading && errorMessage !== '' && (
-                  <p style={{ color: '#c62828' }}>{errorMessage}</p>
+                  <p style={ERROR_TEXT_STYLE}>{errorMessage}</p>
                 )}
 
                 {!isLoading && errorMessage === '' && records.length === 0 && (
@@ -112,8 +146,9 @@ const FeatureAttributes = (props: FeatureAttributesProps) => {
                     {records.map((record, recordIndex) => (
                       <div key={`${stateKey}-${recordIndex}`} style={ATTRIBUTE_RECORD_STYLE}>
                         {record.displayValues.map((displayValue) => (
-                          <div key={`${stateKey}-${recordIndex}-${displayValue.fieldName}`}>
-                            <strong>{displayValue.label}:</strong> {displayValue.value || ''}
+                          <div key={`${stateKey}-${recordIndex}-${displayValue.fieldName}`} style={ATTRIBUTE_ROW_STYLE}>
+                            <div style={ATTRIBUTE_ROW_LABEL_STYLE}>{displayValue.label}</div>
+                            <div style={ATTRIBUTE_ROW_VALUE_STYLE}>{displayValue.value || ''}</div>
                           </div>
                         ))}
                       </div>
