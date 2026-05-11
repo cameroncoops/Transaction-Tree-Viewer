@@ -258,6 +258,20 @@ interface HighlightHandle {
   remove: () => void
 }
 
+const getRelatedDataSourcesArray = (config: Config | undefined): any[] => {
+  const relatedDataSources = (config as any)?.relatedDataSources
+
+  if (Array.isArray(relatedDataSources)) {
+    return relatedDataSources
+  }
+
+  if (relatedDataSources && typeof relatedDataSources[Symbol.iterator] === 'function') {
+    return Array.from(relatedDataSources)
+  }
+
+  return []
+}
+
 const getFeatureUidsFromNodes = (nodes: StructureNode[]): string[] => {
   return nodes.flatMap((node) => {
     const currentFeatureUid = node.feature_uid ? [node.feature_uid] : []
@@ -469,6 +483,10 @@ const Widget = (props: AllWidgetProps<Config>) => {
 
   const fieldMapParseResult = parseStructureFieldMap(props.config?.fieldMapJson)
   const structureFieldMap = fieldMapParseResult.fieldMap
+  const relatedDataSources = getRelatedDataSourcesArray(props.config)
+  const hasStockViewRelatedDataSource = relatedDataSources.some((relatedDataSource) => {
+    return relatedDataSource.key === 'stockView'
+  })
 
   const fieldValidationResult = structureFieldMap
     ? validateFieldMapAgainstAvailableFields(
@@ -1359,7 +1377,10 @@ const Widget = (props: AllWidgetProps<Config>) => {
         />
       )}
 
-      <div style={CONTENT_STYLE}>
+      <div
+        style={CONTENT_STYLE}
+        data-stock-view-configured={hasStockViewRelatedDataSource ? 'true' : 'false'}
+      >
         <div style={HEADER_STYLE}>
           <h3 style={HEADER_TITLE_STYLE}>Transaction Tree Viewer</h3>
           <span style={HEADER_SUBTITLE_STYLE}>
