@@ -34,6 +34,7 @@ export interface StructureNode
   appendedDisplayValues?: AppendedDisplayValue[]
   feature_uid?: string
   featureLabel?: string
+  featureFieldValues?: { [fieldName: string]: unknown }
 }
 
 const getRecordData = (record: DataRecord): { [key: string]: unknown } => {
@@ -74,6 +75,27 @@ const getRecordStringValue = (record: DataRecord, fieldName: string): string => 
   }
 
   return String(value).trim()
+}
+
+const getChildCountBreakdownFieldNames = (fieldMap: StructureFieldMap): string[] => {
+  return fieldMap.hierarchyFields.flatMap((field) => {
+    const breakdownFieldName = String(field.childCountBreakdownFieldName || '').trim()
+
+    return breakdownFieldName !== ''
+      ? [breakdownFieldName]
+      : []
+  })
+}
+
+const buildFeatureFieldValues = (record: DataRecord, fieldMap: StructureFieldMap): { [fieldName: string]: unknown } => {
+  const featureFieldValues: { [fieldName: string]: unknown } = {}
+  const fieldNames = getChildCountBreakdownFieldNames(fieldMap)
+
+  fieldNames.forEach((fieldName) => {
+    featureFieldValues[fieldName] = getRecordRawValue(record, fieldName)
+  })
+
+  return featureFieldValues
 }
 
 const hasRawValue = (value: unknown): boolean => {
@@ -230,6 +252,7 @@ export const buildStructureHierarchyFromRecords = (
       ? getRecordStringValue(record, featureLabelField.fieldName)
       : ''
     const selectableFieldKey = getSelectableFieldKeyForRecord(fieldMap, activeHierarchyFields)
+    const featureFieldValues = buildFeatureFieldValues(record, fieldMap)
 
     let currentChildren = rootNodes
     let parentKey = ''
@@ -262,7 +285,8 @@ export const buildStructureHierarchyFromRecords = (
           children: [],
           appendedDisplayValues,
           feature_uid: nodeFeatureUid,
-          featureLabel: isSelectableField ? (featureLabel || value) : undefined
+          featureLabel: isSelectableField ? (featureLabel || value) : undefined,
+          featureFieldValues: isSelectableField ? featureFieldValues : undefined
         }
 
         currentChildren.push(node)

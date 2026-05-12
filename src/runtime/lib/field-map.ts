@@ -71,6 +71,11 @@ export interface HierarchyFieldMapping extends FieldMapping
   key: string
   optional?: boolean
   filter?: boolean
+  showChildCount?: boolean
+  childCountLabel?: string
+  childCountPrefixLabel?: string
+  childCountBreakdownFieldName?: string
+  childCountBreakdownSort?: 'label' | 'count'
   appendFields?: HierarchyAppendFieldMapping[]
   relatedSummaries?: RelatedSummaryConfig[]
   relatedBreakdowns?: RelatedBreakdownConfig[]
@@ -152,6 +157,52 @@ const validateFilterFlag = (filter: unknown, context: string): string => {
   if (typeof filter !== 'boolean')
   {
     return `${context} filter must be a boolean when supplied.`
+  }
+
+  return ''
+}
+
+const validateHierarchyChildCountSettings = (field: HierarchyFieldMapping): string => {
+  if (field.showChildCount !== undefined && field.showChildCount !== null && typeof field.showChildCount !== 'boolean')
+  {
+    return `hierarchyFields entry ${field.key} showChildCount must be a boolean when supplied.`
+  }
+
+  if (
+    field.childCountLabel !== undefined &&
+    field.childCountLabel !== null &&
+    !hasText(field.childCountLabel)
+  )
+  {
+    return `hierarchyFields entry ${field.key} childCountLabel must be a non-empty string when supplied.`
+  }
+
+  if (
+    field.childCountPrefixLabel !== undefined &&
+    field.childCountPrefixLabel !== null &&
+    !hasText(field.childCountPrefixLabel)
+  )
+  {
+    return `hierarchyFields entry ${field.key} childCountPrefixLabel must be a non-empty string when supplied.`
+  }
+
+  if (
+    field.childCountBreakdownFieldName !== undefined &&
+    field.childCountBreakdownFieldName !== null &&
+    !hasText(field.childCountBreakdownFieldName)
+  )
+  {
+    return `hierarchyFields entry ${field.key} childCountBreakdownFieldName must be a non-empty string when supplied.`
+  }
+
+  if (
+    field.childCountBreakdownSort !== undefined &&
+    field.childCountBreakdownSort !== null &&
+    field.childCountBreakdownSort !== 'label' &&
+    field.childCountBreakdownSort !== 'count'
+  )
+  {
+    return `hierarchyFields entry ${field.key} childCountBreakdownSort must be label or count when supplied.`
   }
 
   return ''
@@ -621,6 +672,16 @@ export const parseStructureFieldMap = (fieldMapJson: string | undefined): FieldM
         }
       }
 
+      const childCountValidationError = validateHierarchyChildCountSettings(hierarchyField)
+
+      if (childCountValidationError !== '')
+      {
+        return {
+          fieldMap: null,
+          errorMessage: childCountValidationError
+        }
+      }
+
       const appendValidationError = validateAppendFields(hierarchyField)
 
       if (appendValidationError !== '')
@@ -731,6 +792,9 @@ export const parseStructureFieldMap = (fieldMapJson: string | undefined): FieldM
 export const getConfiguredFieldNamesFromFieldMap = (fieldMap: StructureFieldMap): string[] => {
   const fieldNames = fieldMap.hierarchyFields.flatMap((field) => {
     const hierarchyFieldNames = [field.fieldName]
+    const childCountBreakdownFieldNames = hasText(field.childCountBreakdownFieldName)
+      ? [String(field.childCountBreakdownFieldName).trim()]
+      : []
     const appendFieldNames = (field.appendFields || []).map((appendField) => appendField.fieldName)
     const relatedSummaryJoinFieldNames = (field.relatedSummaries || []).map((summary) => summary.joinField)
     const relatedBreakdownJoinFieldNames = (field.relatedBreakdowns || []).flatMap((breakdown) => {
@@ -741,7 +805,13 @@ export const getConfiguredFieldNamesFromFieldMap = (fieldMap: StructureFieldMap)
       return [breakdown.joinField, ...targetFieldName]
     })
 
-    return [...hierarchyFieldNames, ...appendFieldNames, ...relatedSummaryJoinFieldNames, ...relatedBreakdownJoinFieldNames]
+    return [
+      ...hierarchyFieldNames,
+      ...childCountBreakdownFieldNames,
+      ...appendFieldNames,
+      ...relatedSummaryJoinFieldNames,
+      ...relatedBreakdownJoinFieldNames
+    ]
   })
 
   fieldNames.push(fieldMap.identityFields.feature_uid.fieldName)

@@ -1,5 +1,5 @@
 import { React } from 'jimu-core'
-import type { FeatureAttributeConfig, StructureFieldMap } from '../lib/field-map'
+import type { FeatureAttributeConfig, HierarchyFieldMapping, StructureFieldMap } from '../lib/field-map'
 import type { BasicLinkedTableRecord } from '../lib/feature-attributes'
 import type { StructureNode } from '../lib/structure-model'
 import FeatureAttributes from './FeatureAttributes'
@@ -98,6 +98,188 @@ const EMPTY_STATE_STYLE = {
   color: '#6a746d',
 }
 
+const getHierarchyFieldForNode = (node: StructureNode, structureFieldMap: StructureFieldMap) => {
+  return structureFieldMap.hierarchyFields.find((field) => {
+    return field.key === node.fieldKey
+  })
+}
+
+const getFeatureIdentityKey = (node: StructureNode): string => {
+  if (node.feature_uid)
+  {
+    return `feature_uid:${node.feature_uid}`
+  }
+
+  return `leaf:${node.nodeKey}`
+}
+
+const getBreakdownValueText = (value: unknown): string => {
+  if (value === null || value === undefined)
+  {
+    return 'Unknown'
+  }
+
+  const textValue = String(value).trim()
+
+  return textValue !== ''
+    ? textValue
+    : 'Unknown'
+}
+
+const getFeatureFieldValue = (node: StructureNode, fieldName: string): unknown => {
+  const requestedFieldName = fieldName.toLowerCase()
+  const featureFieldValues = node.featureFieldValues || {}
+
+  if (Object.prototype.hasOwnProperty.call(featureFieldValues, fieldName))
+  {
+    return featureFieldValues[fieldName]
+  }
+
+  const matchingFieldName = Object.keys(featureFieldValues).find((key) => {
+    const lowerKey = key.toLowerCase()
+
+    return lowerKey === requestedFieldName || lowerKey.endsWith(`.${requestedFieldName}`)
+  })
+
+  return matchingFieldName
+    ? featureFieldValues[matchingFieldName]
+    : undefined
+}
+
+const collectDescendantFeatureDetails = (
+  node: StructureNode,
+  breakdownFieldName?: string
+): Map<string, string> => {
+  const featureDetailsByIdentity = new Map<string, string>()
+
+  if (node.feature_uid)
+  {
+    const featureIdentity = getFeatureIdentityKey(node)
+    const breakdownValue = breakdownFieldName
+      ? getBreakdownValueText(getFeatureFieldValue(node, breakdownFieldName))
+      : ''
+
+    featureDetailsByIdentity.set(featureIdentity, breakdownValue)
+    return featureDetailsByIdentity
+  }
+
+  if (!Array.isArray(node.children) || node.children.length === 0)
+  {
+    return featureDetailsByIdentity
+  }
+
+  node.children.forEach((childNode) => {
+    const childFeatureDetails = collectDescendantFeatureDetails(childNode, breakdownFieldName)
+
+    childFeatureDetails.forEach((breakdownValue, identity) => {
+      if (!featureDetailsByIdentity.has(identity))
+      {
+        featureDetailsByIdentity.set(identity, breakdownValue)
+      }
+    })
+  })
+
+  return featureDetailsByIdentity
+}
+
+const getSortedBreakdownEntries = (
+  breakdownCountsByLabel: Map<string, number>,
+  sortMode: 'label' | 'count'
+): Array<[string, number]> => {
+  return Array.from(breakdownCountsByLabel.entries()).sort((a, b) => {
+    if (sortMode === 'count' && b[1] !== a[1])
+    {
+      return b[1] - a[1]
+    }
+
+    return a[0].localeCompare(b[0], undefined, {
+      numeric: true,
+      sensitivity: 'base'
+    })
+  })
+}
+
+const getGroupNodeDisplayText = (node: StructureNode, hierarchyField?: HierarchyFieldMapping): string => {
+  const defaultDisplayText = `${node.label}: ${node.value}`
+
+  if (!hierarchyField?.showChildCount)
+  {
+    return defaultDisplayText
+  }
+
+  const descendantFeatureDetails = collectDescendantFeatureDetails(
+    node,
+    hierarchyField.childCountBreakdownFieldName
+  )
+  const descendantCount = descendantFeatureDetails.size
+  const childCountLabel = String(hierarchyField.childCountLabel || 'Items').trim() || 'Items'
+  const childCountPrefixLabel = String(hierarchyField.childCountPrefixLabel || '').trim()
+  const countText = descendantCount.toLocaleString('en-AU')
+
+  if (childCountPrefixLabel === '')
+  {
+    let displayText = `${defaultDisplayText} (${countText} ${childCountLabel})`
+
+    if (hierarchyField.childCountBreakdownFieldName)
+    {
+      const breakdownText = getGroupNodeBreakdownText(descendantFeatureDetails, hierarchyField)
+
+      if (breakdownText !== '')
+      {
+        displayText += ` ${breakdownText}`
+      }
+    }
+
+    return displayText
+  }
+
+  let displayText = `${childCountPrefixLabel}: ${node.value} - ${childCountLabel}: ${countText}`
+
+  if (hierarchyField.childCountBreakdownFieldName)
+  {
+    const breakdownText = getGroupNodeBreakdownText(descendantFeatureDetails, hierarchyField)
+
+    if (breakdownText !== '')
+    {
+      displayText += ` ${breakdownText}`
+    }
+  }
+
+  return displayText
+}
+
+const getGroupNodeBreakdownText = (
+  descendantFeatureDetails: Map<string, string>,
+  hierarchyField: HierarchyFieldMapping
+): string => {
+  if (!hierarchyField.childCountBreakdownFieldName)
+  {
+    return ''
+  }
+
+  const breakdownCountsByLabel = new Map<string, number>()
+
+  descendantFeatureDetails.forEach((breakdownValue) => {
+    const nextCount = (breakdownCountsByLabel.get(breakdownValue) || 0) + 1
+    breakdownCountsByLabel.set(breakdownValue, nextCount)
+  })
+
+  const sortMode = hierarchyField.childCountBreakdownSort || 'label'
+  const breakdownParts = getSortedBreakdownEntries(breakdownCountsByLabel, sortMode).map(([label, count]) => {
+    return `${count.toLocaleString('en-AU')} ${label}`
+  })
+
+  return breakdownParts.length > 0
+    ? `(${breakdownParts.join(', ')})`
+    : ''
+}
+
+const getGroupNodeDisplayLabel = (node: StructureNode, structureFieldMap: StructureFieldMap): string => {
+  const hierarchyField = getHierarchyFieldForNode(node, structureFieldMap)
+
+  return getGroupNodeDisplayText(node, hierarchyField)
+}
+
 const getTreeToggleIcon = (isExpanded: boolean): string => {
   return isExpanded ? '▼' : '▶'
 }
@@ -186,9 +368,7 @@ const hasConfiguredRelatedBreakdowns = (node: StructureNode, props: StructureTre
     return false
   }
 
-  const hierarchyField = props.structureFieldMap.hierarchyFields.find((field) => {
-    return field.key === node.fieldKey
-  }) as any
+  const hierarchyField = getHierarchyFieldForNode(node, props.structureFieldMap) as any
 
   return Array.isArray(hierarchyField?.relatedBreakdowns) && hierarchyField.relatedBreakdowns.length > 0
 }
@@ -397,6 +577,7 @@ const renderNode = (
   const isIsolated = !!props.isolatedTopLevelValues?.includes(node.value)
   const indent = getNodeIndent(node)
   const textStyle = getNodeTextStyle(node, isSelected, hasChildren)
+  const groupNodeDisplayText = getGroupNodeDisplayLabel(node, props.structureFieldMap)
 
   const handleToggle = () => {
     const willExpand = !isExpanded
@@ -475,7 +656,7 @@ const renderNode = (
             </button>
           ) : (
             <div style={textStyle}>
-              {node.label}: {node.value}
+              {groupNodeDisplayText}
               {renderAppendedDisplayValues(node)}
             </div>
           )}
