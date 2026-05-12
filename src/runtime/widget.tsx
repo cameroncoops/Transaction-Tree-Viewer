@@ -1,3 +1,92 @@
+/**
+ * Transaction Tree Viewer widget
+ *
+ * Purpose
+ * -------
+ * This ArcGIS Experience Builder runtime widget displays a configurable tree of active
+ * spatial features. In the Living Places / Garden Beds context, the main spatial feature
+ * is a garden bed, and the tree normally groups beds by configured hierarchy fields such
+ * as zone, level, bed, room, type, or other project-specific structure fields.
+ *
+ * The widget is intentionally read-focused. It does not edit geometry, plant stock, or
+ * transaction rows. Its job is to make the active/current feature dataset easier to
+ * navigate, filter, select, isolate on the map, and inspect alongside related records.
+ *
+ * Architecture
+ * ------------
+ * 1. Configuration is read from the Experience Builder widget settings through
+ *    `props.config`. The important setting is `fieldMapJson`, which is parsed into a
+ *    `StructureFieldMap`. That field map tells the widget which datasource fields define
+ *    identity, hierarchy, append values, related summaries, related breakdowns, filters,
+ *    and optional linked feature-attribute panels.
+ *
+ * 2. `props.useDataSources[0]` is treated as the main active feature datasource. This is
+ *    the datasource used to build the tree, resolve feature identity, provide direct
+ *    filter options, and coordinate map selection.
+ *
+ * 3. Any additional datasource slots, starting at `props.useDataSources[1]`, are treated
+ *    as related or lookup datasources. The code derives the required related datasource
+ *    keys from the field map, then maps those keys to the datasource slots in first-seen
+ *    order. This keeps the widget generic rather than hard-coding Garden Beds, Parking
+ *    Bays, or any other dataset into the runtime logic.
+ *
+ * 4. Main datasource records are converted into a nested `StructureNode` hierarchy by
+ *    `buildStructureHierarchyFromRecords`. Related summaries can be queried first and
+ *    injected into the hierarchy so tree rows can show derived totals such as stock count.
+ *
+ * 5. Related breakdowns are lazy-loaded per selected or expanded feature. This is
+ *    important for performance: the widget does not query every child stock/species/cost
+ *    line for every feature upfront. It queries detailed related breakdown rows only when
+ *    the user expands a relevant feature node or expands a branch.
+ *
+ * 6. Filtering has three paths:
+ *    - direct filters compare values already present on the main datasource records;
+ *    - related-breakdown filters query a related datasource and resolve matching main
+ *      feature IDs or join values;
+ *    - resolved-lookup filters let one datasource provide clean dropdown labels while a
+ *      different datasource resolves the selected lookup value back to main feature IDs.
+ *
+ * 7. Map interaction is deliberately separated from visibility filtering. A selected
+ *    feature can be highlighted and zoomed to, but it is not used as the map visibility
+ *    filter. Filters and top-level isolation are the only map visibility drivers. This
+ *    prevents Experience Builder shared datasource selection from causing looped
+ *    selection/filter updates or hiding records that should remain visible.
+ *
+ * 8. The rendered UI is split into:
+ *    - hidden `DataSourceComponent` bindings for main and related datasources;
+ *    - optional `JimuMapViewComponent` binding for the connected map;
+ *    - filter controls;
+ *    - action controls for isolate/selection/collapse;
+ *    - validation/error panels;
+ *    - the `StructureTree` component, which receives the prepared tree state and user
+ *      interaction callbacks.
+ *
+ * Business rules and invariants
+ * -----------------------------
+ * - The configured identity field, normally `feature_uid` or a dataset-specific equivalent,
+ *   is the permanent feature identity used for selection, tree lookup, related joins, and
+ *   map synchronisation.
+ * - Display labels such as bed number, room number, or operational names are not treated
+ *   as permanent identity. They can change without replacing the underlying feature.
+ * - The main active datasource represents the current active feature set. Retired features
+ *   should already be excluded upstream by the active datasource/view/table design.
+ * - Related current-state values such as stock counts are derived/display values. They are
+ *   not written by this widget.
+ * - Shared Experience Builder datasource selection is treated as an input signal only. Once
+ *   captured, it is cleared so local widget state remains the source of truth.
+ * - SQL where clauses are assembled using `escapeSqlValue` for text values before they are
+ *   sent to ArcGIS query or layer-view filter calls.
+ * - Query request IDs are used for async work that can be superseded. If a newer request is
+ *   started before an older one finishes, the older result is ignored.
+ *
+ * Maintenance notes
+ * -----------------
+ * This file is intentionally generic. Avoid adding dataset-specific field names or Garden
+ * Beds-only assumptions directly into this runtime file. Prefer adding those details to the
+ * field-map configuration or to small library helpers that are designed to be configured.
+ */
+
+/** Core Experience Builder runtime imports. */
 import {
   React,
   type AllWidgetProps,
@@ -5,8 +94,11 @@ import {
   DataSourceComponent,
   DataSourceStatus,
 } from 'jimu-core'
+/** ArcGIS map-view bridge used to listen for map clicks, highlight features, and apply layer-view filters. */
 import { JimuMapViewComponent, type JimuMapView } from 'jimu-arcgis'
+/** Widget setting shape produced by the setting UI. */
 import type { Config } from '../config'
+/** Field-map parser and types that make this widget dataset-configurable. */
 import {
   parseStructureFieldMap,
   validateFieldMapAgainstAvailableFields,
@@ -16,6 +108,7 @@ import {
   type RelatedSummaryConfig,
   type StructureFieldMap,
 } from './lib/field-map'
+/** Structure model helpers that convert flat records into the nested tree model used by StructureTree. */
 import {
   buildStructureHierarchyFromRecords,
   getExpandableNodeKeys,
@@ -24,11 +117,13 @@ import {
   type RelatedSummaryValuesByFeatureUid,
   type StructureNode,
 } from './lib/structure-model'
+/** Small datasource helpers that hide Experience Builder record/datasource API differences. */
 import {
   getAvailableFieldNamesFromDataSource,
   getLoadedRecordCountFromDataSource,
   getLoadedRecordsFromDataSource,
 } from './lib/datasource-utils'
+/** Selection and SQL helper functions used when synchronising tree state, map clicks, and datasource selection. */
 import {
   clearDataSourceSelection,
   escapeSqlValue,
@@ -39,22 +134,31 @@ import {
   normaliseUrl,
   resolveFeatureUidFromHitResult,
 } from './lib/selection-utils'
+/** Linked feature-attribute helpers for optional expandable child panels under feature rows. */
 import {
   getFeatureAttributeStateKey,
   parseFeatureAttributeStateKey,
   queryBasicLinkedTableFeatureAttributes,
   type BasicLinkedTableRecord,
 } from './lib/feature-attributes'
+/** Presentational tree component. This file prepares state and callbacks, while StructureTree renders the rows. */
 import StructureTree from './components/StructureTree'
 
+/** Pull React hooks from the Experience Builder-bundled React object. */
 const { useEffect, useRef, useState } = React
 
+/** Number of main active-feature records requested per datasource page. */
 const ACTIVE_FEATURE_DS_PAGE_SIZE = 2000
+/** Number of related/lookup records requested per query page. */
 const RELATED_QUERY_PAGE_SIZE = 2000
+/** Accent colour used for active action links. Do not rely on colour alone for meaning. */
 const ACCENT_COLOR = '#007ac2'
+/** Default header title used when the widget setting does not provide a custom title. */
 const DEFAULT_WIDGET_TITLE = 'Transaction Tree Viewer'
+/** Default header subtitle used when the widget setting does not provide a custom subtitle. */
 const DEFAULT_WIDGET_SUBTITLE = 'Explore and filter active features'
 
+/** Full-widget scroll container style. */
 const PAGE_STYLE = {
   height: '100%',
   overflowY: 'auto' as const,
@@ -63,6 +167,7 @@ const PAGE_STYLE = {
   padding: '0.6rem',
 }
 
+/** Main white card style that contains filters, actions, messages, and tree content. */
 const CONTENT_STYLE = {
   display: 'flex',
   flexDirection: 'column' as const,
@@ -75,12 +180,14 @@ const CONTENT_STYLE = {
   boxSizing: 'border-box' as const,
 }
 
+/** Header wrapper style. */
 const HEADER_STYLE = {
   display: 'block',
   paddingBottom: '0.85rem',
   borderBottom: '1px solid #dfe7df',
 }
 
+/** Header title text style. */
 const HEADER_TITLE_STYLE = {
   margin: 0,
   fontSize: '1.45rem',
@@ -89,6 +196,7 @@ const HEADER_TITLE_STYLE = {
   color: '#203028',
 }
 
+/** Header subtitle text style. */
 const HEADER_SUBTITLE_STYLE = {
   display: 'block',
   marginTop: '0.25rem',
@@ -97,6 +205,7 @@ const HEADER_SUBTITLE_STYLE = {
   lineHeight: 1.35,
 }
 
+/** Filter bar layout style. */
 const FILTER_ROW_STYLE = {
   display: 'flex',
   flexWrap: 'wrap' as const,
@@ -106,6 +215,7 @@ const FILTER_ROW_STYLE = {
   borderBottom: '1px solid #dfe7df',
 }
 
+/** Wrapper style for a single configured filter control. */
 const FILTER_GROUP_STYLE = {
   display: 'flex',
   flexDirection: 'column' as const,
@@ -113,6 +223,7 @@ const FILTER_GROUP_STYLE = {
   minWidth: '12rem',
 }
 
+/** Label style for filter captions. */
 const FILTER_LABEL_STYLE = {
   fontSize: '0.92rem',
   fontWeight: 700,
@@ -120,18 +231,21 @@ const FILTER_LABEL_STYLE = {
   color: '#24352b',
 }
 
+/** Horizontal layout for filter input and Clear button. */
 const FILTER_INPUT_ROW_STYLE = {
   display: 'flex',
   alignItems: 'center',
   gap: '0.45rem',
 }
 
+/** Relative-positioned wrapper so dropdown options can sit under the filter input. */
 const FILTER_COMBO_STYLE = {
   position: 'relative' as const,
   minWidth: '10.5rem',
   maxWidth: '15rem',
 }
 
+/** Text input style for searchable filter controls. */
 const FILTER_INPUT_STYLE = {
   width: '100%',
   padding: '0.52rem 0.6rem',
@@ -144,6 +258,7 @@ const FILTER_INPUT_STYLE = {
   boxSizing: 'border-box' as const,
 }
 
+/** Dropdown list style for visible filter options. */
 const FILTER_OPTIONS_STYLE = {
   position: 'absolute' as const,
   zIndex: 10,
@@ -161,6 +276,7 @@ const FILTER_OPTIONS_STYLE = {
   listStyle: 'none' as const,
 }
 
+/** Button style for each dropdown option. */
 const FILTER_OPTION_BUTTON_STYLE = {
   width: '100%',
   display: 'block',
@@ -174,6 +290,7 @@ const FILTER_OPTION_BUTTON_STYLE = {
   lineHeight: 1.3,
 }
 
+/** Empty-dropdown message style shown when no option matches search text. */
 const FILTER_EMPTY_OPTION_STYLE = {
   padding: '0.25rem 0.4rem',
   color: '#777777',
@@ -181,6 +298,7 @@ const FILTER_EMPTY_OPTION_STYLE = {
   lineHeight: 1.3,
 }
 
+/** Inline Clear button style used beside active filters. */
 const FILTER_CLEAR_BUTTON_STYLE = {
   background: 'none',
   border: 'none',
@@ -191,6 +309,7 @@ const FILTER_CLEAR_BUTTON_STYLE = {
   fontSize: '0.9rem',
 }
 
+/** Action row layout for Clear Isolate, Clear Selection, and Collapse All. */
 const ACTION_ROW_STYLE = {
   display: 'flex',
   flexWrap: 'wrap' as const,
@@ -200,6 +319,7 @@ const ACTION_ROW_STYLE = {
   fontSize: '0.95rem',
 }
 
+/** Link-like button style for non-primary actions. */
 const LINK_BUTTON_STYLE = {
   background: 'none',
   border: 'none',
@@ -210,6 +330,7 @@ const LINK_BUTTON_STYLE = {
   fontSize: '0.95rem',
 }
 
+/** Border panel around the rendered StructureTree. */
 const TREE_PANEL_STYLE = {
   border: '1px solid #dfe7df',
   borderRadius: '8px',
@@ -217,6 +338,7 @@ const TREE_PANEL_STYLE = {
   backgroundColor: '#ffffff',
 }
 
+/** Header row above the tree showing the isolate column and structure column labels. */
 const ISOLATE_HEADER_STYLE = {
   display: 'grid',
   gridTemplateColumns: '5.5rem 1fr',
@@ -232,6 +354,7 @@ const ISOLATE_HEADER_STYLE = {
   backgroundColor: '#fbfdfb',
 }
 
+/** Error/warning panel style. */
 const MESSAGE_PANEL_STYLE = {
   padding: '0.5rem 0.6rem',
   border: '1px solid #f0c8c8',
@@ -240,59 +363,105 @@ const MESSAGE_PANEL_STYLE = {
   fontSize: '0.85rem',
 }
 
+/** Generic empty-state text style. Currently retained for simple fallback messages. */
 const EMPTY_STATE_STYLE = {
   padding: '0.5rem',
   color: '#666666',
   fontSize: '0.9rem',
 }
 
+/**
+ * Query shape passed to the main active-feature DataSourceComponent.
+ * `outFields` controls which attributes are loaded and `pageSize` controls
+ * Experience Builder's datasource page size.
+ */
 interface ActiveFeatureDataSourceQuery {
+  /** Attribute fields requested from the active feature datasource. */
   outFields: string[]
+  /** Maximum records requested per page from the active feature datasource. */
   pageSize: number
 }
 
+/**
+ * Runtime description of one filter control generated from the field map.
+ *
+ * Direct filters read from the main datasource. Related-breakdown filters query
+ * a related datasource to work out which main records match. Resolved-lookup
+ * filters split the dropdown label source from the datasource used to resolve
+ * the selected lookup value back to main feature IDs.
+ */
 interface ConfiguredFilterField {
+  /** Stable runtime key for this filter. */
   id: string
+  /** User-facing filter label displayed above the input. */
   label: string
+  /** Main datasource field used by direct filters, or target/join field fallback for related filters. */
   fieldName: string
+  /** Tells the filtering pipeline which resolution path to use. */
   source: 'direct' | 'relatedBreakdown' | 'resolvedLookup'
+  /** Related datasource key for related-breakdown filters. */
   relatedSourceKey?: string
+  /** Field on the related datasource that links back to the main datasource. */
   relatedJoinField?: string
+  /** Field on the main datasource that related values are matched against. */
   joinField?: string
+  /** Field used as the visible dropdown label for related/resolved filter options. */
   filterDisplayField?: string
+  /** Field used as the stored selected value for related/resolved filter options. */
   filterValueField?: string
+  /** Datasource key used to load dropdown options for resolved-lookup filters. */
   filterOptionsSourceKey?: string
+  /** Datasource key used to resolve a selected lookup value into main feature join values. */
   filterResolveSourceKey?: string
+  /** Field queried in the resolve datasource when a resolved-lookup option is selected. */
   filterResolveValueField?: string
+  /** Field returned from the resolve datasource and matched to the main datasource. */
   filterResolveJoinField?: string
+  /** Optional explicit main datasource target field for resolved filters. */
   targetField?: string
 }
 
+/** Single selectable value shown in a searchable filter dropdown. */
 interface FilterOption {
+  /** User-facing option label. */
   label: string
+  /** Stored option value used when filtering. */
   value: string
 }
 
+/** Runtime lookup of configured related datasource key to actual Experience Builder datasource instance. */
 interface RelatedDataSourceRuntimeMap {
+  /** Key is the field-map source key, value is the connected datasource object. */
   [key: string]: DataSource
 }
 
+/** Related summary config plus the hierarchy field that owns it. */
 interface RelatedSummaryDefinition extends RelatedSummaryConfig {
+  /** Hierarchy field key that declared this summary. */
   hierarchyFieldKey: string
 }
 
+/** Related breakdown config plus the hierarchy field that owns it. */
 interface RelatedBreakdownDefinition extends RelatedBreakdownConfig {
+  /** Hierarchy field key that declared this breakdown. */
   hierarchyFieldKey: string
 }
 
+/** ArcGIS event-handle shape used by map click listeners. */
 interface ViewEventHandle {
+  /** Removes the event listener from the map view. */
   remove: () => void
 }
 
+/** ArcGIS highlight-handle shape used by selected feature highlighting. */
 interface HighlightHandle {
+  /** Clears the highlight from the map view. */
   remove: () => void
 }
 
+/**
+ * Adds a non-empty related datasource key to a list, preserving first-seen order and avoiding duplicates.
+ */
 const addSourceKeyIfPresent = (sourceKeys: string[], value: unknown) => {
   const sourceKey = String(value || '').trim()
 
@@ -301,6 +470,9 @@ const addSourceKeyIfPresent = (sourceKeys: string[], value: unknown) => {
   }
 }
 
+/**
+ * Flattens all related summary definitions from the hierarchy field map and records which hierarchy field each summary came from.
+ */
 const getRelatedSummaryDefinitions = (fieldMap: StructureFieldMap): RelatedSummaryDefinition[] => {
   return fieldMap.hierarchyFields.flatMap((hierarchyField) => {
     const relatedSummaries = Array.isArray(hierarchyField.relatedSummaries)
@@ -317,6 +489,9 @@ const getRelatedSummaryDefinitions = (fieldMap: StructureFieldMap): RelatedSumma
 }
 
 
+/**
+ * Flattens all related breakdown definitions from the hierarchy field map and records which hierarchy field each breakdown came from.
+ */
 const getRelatedBreakdownDefinitions = (fieldMap: StructureFieldMap): RelatedBreakdownDefinition[] => {
   return fieldMap.hierarchyFields.flatMap((hierarchyField) => {
     const relatedBreakdowns = Array.isArray(hierarchyField.relatedBreakdowns)
@@ -332,6 +507,9 @@ const getRelatedBreakdownDefinitions = (fieldMap: StructureFieldMap): RelatedBre
   })
 }
 
+/**
+ * Collects every related datasource key required by summaries, breakdowns, filter option sources, and filter resolve sources.
+ */
 const getRelatedSourceKeysFromFieldMap = (fieldMap: StructureFieldMap | null): string[] => {
   if (!fieldMap) {
     return []
@@ -355,6 +533,9 @@ const getRelatedSourceKeysFromFieldMap = (fieldMap: StructureFieldMap | null): s
 // source keys are mapped onto `useDataSources[1..]` in first-seen order so
 // future keys can claim the next available datasource slots without inventing
 // a parallel config system.
+/**
+ * Maps each related datasource key to its Experience Builder useDataSources slot index. Index 0 is reserved for the main datasource.
+ */
 const getRelatedSourceKeyIndexMap = (
   fieldMap: StructureFieldMap | null,
 ): { [sourceKey: string]: number } => {
@@ -366,6 +547,9 @@ const getRelatedSourceKeyIndexMap = (
   }, {} as { [sourceKey: string]: number })
 }
 
+/**
+ * Recursively extracts every feature UID from a tree branch or full tree.
+ */
 const getFeatureUidsFromNodes = (nodes: StructureNode[]): string[] => {
   return nodes.flatMap((node) => {
     const currentFeatureUid = node.feature_uid ? [node.feature_uid] : []
@@ -375,6 +559,9 @@ const getFeatureUidsFromNodes = (nodes: StructureNode[]): string[] => {
   })
 }
 
+/**
+ * Recursively lists all node keys below a branch so the whole branch can be expanded at once.
+ */
 const getExpandableNodeKeysForBranch = (node: StructureNode): string[] => {
   const childKeys = node.children.flatMap((childNode) => {
     return getExpandableNodeKeysForBranch(childNode)
@@ -383,6 +570,9 @@ const getExpandableNodeKeysForBranch = (node: StructureNode): string[] => {
   return [node.nodeKey, ...childKeys]
 }
 
+/**
+ * Recursively searches the structure tree for the node with the supplied node key.
+ */
 const findNodeByKey = (
   nodes: StructureNode[],
   nodeKey: string,
@@ -405,6 +595,9 @@ const findNodeByKey = (
   return null
 }
 
+/**
+ * Returns all feature-level nodes under a branch. Group-only nodes are skipped unless they carry a feature UID.
+ */
 const getFeatureNodesFromBranch = (node: StructureNode): StructureNode[] => {
   const childFeatureNodes = node.children.flatMap((childNode) => {
     return getFeatureNodesFromBranch(childNode)
@@ -413,6 +606,9 @@ const getFeatureNodesFromBranch = (node: StructureNode): StructureNode[] => {
   return node.feature_uid ? [node, ...childFeatureNodes] : childFeatureNodes
 }
 
+/**
+ * Builds a compact snapshot of active direct and resolved filters for trace logging.
+ */
 const getActiveFilterDebugState = (
   configuredFilters: ConfiguredFilterField[],
   selectedFilterValues: { [key: string]: string },
@@ -451,6 +647,9 @@ const getActiveFilterDebugState = (
   }
 }
 
+/**
+ * Builds a compact snapshot of loaded and selected datasource record counts for trace logging.
+ */
 const getDataSourceSelectionDebugState = (dataSource: DataSource | null) => {
   const loadedRecords = dataSource ? getLoadedRecordsFromDataSource(dataSource) : []
   const selectedRecords = dataSource && typeof dataSource.getSelectedRecords === 'function'
@@ -463,6 +662,9 @@ const getDataSourceSelectionDebugState = (dataSource: DataSource | null) => {
   }
 }
 
+/**
+ * Converts field-map filter flags into runtime filter definitions used by the filter bar and filtering pipeline.
+ */
 const getFilteredHierarchyFields = (
   fieldMap: StructureFieldMap,
 ): ConfiguredFilterField[] => {
@@ -583,6 +785,9 @@ const getFilteredHierarchyFields = (
   return filters
 }
 
+/**
+ * Reads a field value from an Experience Builder record as trimmed text, allowing for exact or layer-qualified field names.
+ */
 const getRecordFilterValue = (record: any, fieldName: string): string => {
   const directValue = getRecordStringValue(record, fieldName)
 
@@ -616,6 +821,9 @@ const getRecordFilterValue = (record: any, fieldName: string): string => {
   return String(value).trim()
 }
 
+/**
+ * Reads a field value from an Experience Builder record without converting it to text.
+ */
 const getRecordRawValue = (record: any, fieldName: string): unknown => {
   const data = record && typeof record.getData === 'function' ? record.getData() : {}
 
@@ -640,6 +848,9 @@ const getRecordRawValue = (record: any, fieldName: string): unknown => {
   return data[matchingKey]
 }
 
+/**
+ * Normalises different ArcGIS/Experience Builder query result shapes into a simple record array.
+ */
 const getQueryRecords = (queryResult: any): any[] => {
   if (Array.isArray(queryResult)) {
     return queryResult
@@ -656,6 +867,9 @@ const getQueryRecords = (queryResult: any): any[] => {
   return []
 }
 
+/**
+ * Runs a related datasource query with the project page-size defaults and returns a normalised record array.
+ */
 const queryRelatedRecords = async (
   relatedDataSource: any,
   query: any,
@@ -678,6 +892,9 @@ const queryRelatedRecords = async (
 // Lookup option and resolved-filter queries may need more than one page of
 // results. Keep this on `dataSource.query(...)` so the widget does not depend
 // on `queryAll(...)` support or return-shape differences.
+/**
+ * Runs repeated related datasource queries until all pages have been fetched.
+ */
 const queryPagedRelatedRecords = async (
   relatedDataSource: any,
   query: any,
@@ -705,6 +922,9 @@ const queryPagedRelatedRecords = async (
   }
 }
 
+/**
+ * Builds a text SQL IN clause from a list of values, escaping each value for safe query use.
+ */
 const buildTextInClause = (fieldName: string, values: string[]): string => {
   const cleanValues = values
     .map((value) => String(value || '').trim())
@@ -721,10 +941,16 @@ const buildTextInClause = (fieldName: string, values: string[]): string => {
   return `${fieldName} IN (${escapedValues.join(', ')})`
 }
 
+/**
+ * Combines an existing where clause with a numeric non-zero test for summary/breakdown rows.
+ */
 const buildNonZeroRelatedWhereClause = (baseWhere: string, fieldName: string): string => {
   return `(${baseWhere}) AND ${fieldName} <> 0`
 }
 
+/**
+ * Splits a long value list into smaller chunks to keep ArcGIS SQL IN clauses manageable.
+ */
 const chunkValues = (values: string[], chunkSize: number): string[][] => {
   const chunks: string[][] = []
 
@@ -735,6 +961,9 @@ const chunkValues = (values: string[], chunkSize: number): string[][] => {
   return chunks
 }
 
+/**
+ * Queries configured related summary totals and returns them by feature UID for injection into the tree model.
+ */
 const queryRelatedSummaryValuesByFeatureUid = async (
   mainRecords: any[],
   fieldMap: StructureFieldMap,
@@ -758,6 +987,7 @@ const queryRelatedSummaryValuesByFeatureUid = async (
       continue
     }
 
+    // Maps the related join value back to one or more main feature UIDs.
     const joinValueToFeatureUids: { [joinValue: string]: string[] } = {}
 
     mainRecords.forEach((record) => {
@@ -781,6 +1011,7 @@ const queryRelatedSummaryValuesByFeatureUid = async (
     })
 
     const joinValues = Object.keys(joinValueToFeatureUids)
+    // ArcGIS returns statistics under this generated field name.
     const statisticFieldName = `${summary.key}_sum`
 
     for (const joinValueChunk of chunkValues(joinValues, 75)) {
@@ -838,6 +1069,9 @@ const queryRelatedSummaryValuesByFeatureUid = async (
 }
 
 
+/**
+ * Reads a related breakdown group field as trimmed text.
+ */
 const getRelatedGroupFieldValue = (record: any, groupField: RelatedBreakdownGroupField): string => {
   const value = getRecordRawValue(record, groupField.fieldName)
 
@@ -849,12 +1083,18 @@ const getRelatedGroupFieldValue = (record: any, groupField: RelatedBreakdownGrou
   return String(value).trim()
 }
 
+/**
+ * Creates a stable internal grouping key from one or more related group fields.
+ */
 const getRelatedGroupKey = (record: any, groupBy: RelatedBreakdownGroupField[]): string => {
   return groupBy.map((groupField) => {
     return `${groupField.fieldName}=${getRelatedGroupFieldValue(record, groupField)}`
   }).join('|||')
 }
 
+/**
+ * Creates the user-facing label for a related breakdown group from one or more group fields.
+ */
 const getRelatedGroupDisplayValue = (record: any, groupBy: RelatedBreakdownGroupField[]): string => {
   return groupBy.map((groupField) => {
     return getRelatedGroupFieldValue(record, groupField)
@@ -863,12 +1103,18 @@ const getRelatedGroupDisplayValue = (record: any, groupBy: RelatedBreakdownGroup
   }).join(' / ')
 }
 
+/**
+ * Converts a raw field value to a number and returns zero when conversion fails.
+ */
 const getNumberValue = (value: unknown): number => {
   const numericValue = typeof value === 'number' ? value : Number(value)
 
   return Number.isNaN(numericValue) ? 0 : numericValue
 }
 
+/**
+ * Collects every field needed to query a related breakdown, including parent and child grouping fields.
+ */
 const getBreakdownOutFields = (breakdown: RelatedBreakdownDefinition): string[] => {
   const fieldNames = new Set<string>()
 
@@ -893,6 +1139,9 @@ const getBreakdownOutFields = (breakdown: RelatedBreakdownDefinition): string[] 
   return Array.from(fieldNames)
 }
 
+/**
+ * Creates a related breakdown StructureNode with a summed value displayed as an appended value.
+ */
 const makeRelatedBreakdownNode = (
   featureUid: string,
   breakdownKey: string,
@@ -925,10 +1174,16 @@ const makeRelatedBreakdownNode = (
   }
 }
 
+/**
+ * Formats related count numbers using Australian number formatting.
+ */
 const formatRelatedCount = (value: number): string => {
   return value.toLocaleString('en-AU')
 }
 
+/**
+ * Formats a cost/unit string into the display suffix used for stock-line child rows.
+ */
 const formatCostUnitDisplay = (value: string): string => {
   const parts = String(value || '').split('/').map((part) => {
     return part.trim()
@@ -949,6 +1204,9 @@ const formatCostUnitDisplay = (value: string): string => {
   return `$${parts[0]} ${parts.slice(1).join(' ')}`
 }
 
+/**
+ * Creates a display-only related StructureNode whose value is already fully formatted for the tree.
+ */
 const makeRelatedDisplayNode = (
   featureUid: string,
   breakdownKey: string,
@@ -968,6 +1226,9 @@ const makeRelatedDisplayNode = (
   }
 }
 
+/**
+ * Queries configured related breakdown rows and builds per-feature child tree nodes.
+ */
 const queryRelatedBreakdownNodesByFeatureUid = async (
   mainRecords: any[],
   fieldMap: StructureFieldMap,
@@ -1041,6 +1302,8 @@ const queryRelatedBreakdownNodesByFeatureUid = async (
       })
       : []
 
+    // Intermediate nested aggregate store used before converting query results
+    // into StructureNode children. The shape is feature -> parent group -> child group.
     const featureUidAggregates: {
       [featureUid: string]: {
         [parentGroupKey: string]: {
@@ -1322,6 +1585,9 @@ const queryRelatedBreakdownNodesByFeatureUid = async (
   return breakdownNodesByFeatureUid
 }
 
+/**
+ * Builds sorted direct-filter options from records already loaded in the main datasource.
+ */
 const getFilterOptionsFromRecords = (
   records: any[],
   filterField: ConfiguredFilterField,
@@ -1347,6 +1613,9 @@ const getFilterOptionsFromRecords = (
   })
 }
 
+/**
+ * Applies the current search text to a filter option list.
+ */
 const getVisibleFilterOptions = (
   options: FilterOption[],
   searchText: string,
@@ -1364,6 +1633,9 @@ const getVisibleFilterOptions = (
   })
 }
 
+/**
+ * Applies active direct filters to the main datasource records in memory.
+ */
 const getMainSourceFilteredRecords = (
   records: any[],
   configuredFilters: ConfiguredFilterField[],
@@ -1394,6 +1666,9 @@ const getMainSourceFilteredRecords = (
 // filters keep the dropdown options source separate from the resolve source so
 // a lookup table can provide clean labels while a related/summary table maps
 // the selected value back to main-tree IDs.
+/**
+ * Queries related or lookup datasources to build dropdown options for non-direct filters.
+ */
 const queryRelatedFilterOptions = async (
   filterField: ConfiguredFilterField,
   relatedDataSourceByKey: RelatedDataSourceRuntimeMap,
@@ -1457,6 +1732,9 @@ const queryRelatedFilterOptions = async (
   })
 }
 
+/**
+ * Finds the main datasource field that a non-direct filter should ultimately constrain.
+ */
 const resolveFilterTargetField = (
   filterField: ConfiguredFilterField,
   structureFieldMap: StructureFieldMap,
@@ -1474,6 +1752,9 @@ const resolveFilterTargetField = (
   return String(filterField.joinField || '').trim()
 }
 
+/**
+ * Returns a readable datasource name for debug logs.
+ */
 const getRelatedDataSourceDebugName = (relatedDataSource: any): string => {
   if (typeof relatedDataSource?.getLabel === 'function') {
     return String(relatedDataSource.getLabel() || '').trim()
@@ -1482,6 +1763,9 @@ const getRelatedDataSourceDebugName = (relatedDataSource: any): string => {
   return String(relatedDataSource?.id || '').trim()
 }
 
+/**
+ * Resolves a selected related/lookup filter value into main datasource join values.
+ */
 const resolveFilterJoinValues = async (
   filterField: ConfiguredFilterField,
   selectedValue: string,
@@ -1560,6 +1844,9 @@ const resolveFilterJoinValues = async (
   }
 }
 
+/**
+ * Applies active non-direct filters by resolving them into join-value sets and filtering main records.
+ */
 const getRelatedBreakdownFilteredRecords = async (
   records: any[],
   configuredFilters: ConfiguredFilterField[],
@@ -1629,78 +1916,151 @@ const getRelatedBreakdownFilteredRecords = async (
   return filteredRecords
 }
 
+/**
+ * Builds an escaped text equality where clause for ArcGIS queries and layer-view filters.
+ */
 const buildTextEqualityClause = (fieldName: string, value: string): string => {
   return `${fieldName} = '${escapeSqlValue(value)}'`
 }
 
+/**
+ * Main Experience Builder runtime component for the Transaction Tree Viewer widget.
+ */
 const Widget = (props: AllWidgetProps<Config>) => {
+  // -----------------------------
+  // React state: datasource connections
+  // -----------------------------
+  // `activeFeatureDs` is the main active/current feature datasource. It is the
+  // source used to build the hierarchy, provide direct filters, and coordinate
+  // map selection.
   const [activeFeatureDs, setActiveFeatureDs] = useState<DataSource | null>(
     null,
   )
+  // `relatedDataSourceByKey` stores connected related/lookup datasources by
+  // field-map source key, for example stock summary, species lookup, or other
+  // project-specific related tables.
   const [relatedDataSourceByKey, setRelatedDataSourceByKey] =
     useState<RelatedDataSourceRuntimeMap>({})
+  // `relatedDataSourceError` holds the latest related datasource connection or query error shown in the UI.
   const [relatedDataSourceError, setRelatedDataSourceError] = useState('')
+  // `relatedBreakdownNodesByFeatureUid` caches lazy-loaded related child nodes, keyed by feature UID.
   const [relatedBreakdownNodesByFeatureUid, setRelatedBreakdownNodesByFeatureUid] =
     useState<RelatedBreakdownNodesByFeatureUid>({})
+  // Tracks which feature UIDs are currently loading related breakdown rows.
   const [loadingRelatedBreakdownFeatureUids, setLoadingRelatedBreakdownFeatureUids] =
     useState<{ [feature_uid: string]: boolean }>({})
+  // Stores lazy-load related breakdown errors per feature UID.
   const [relatedBreakdownErrorsByFeatureUid, setRelatedBreakdownErrorsByFeatureUid] =
     useState<{ [feature_uid: string]: string }>({})
+
+  // -----------------------------
+  // React state: map, loading, and hierarchy model
+  // -----------------------------
+  // `jimuMapView` is the active Experience Builder map view connected to this widget.
   const [jimuMapView, setJimuMapView] = useState<JimuMapView | null>(null)
+  // `isLoadingFeatures` controls main datasource loading state messages.
   const [isLoadingFeatures, setIsLoadingFeatures] = useState(false)
+  // `loadError` stores main datasource load/validation errors shown in the UI.
   const [loadError, setLoadError] = useState('')
+  // `recordCount` stores the count of records currently loaded in the main datasource.
   const [recordCount, setRecordCount] = useState(0)
+  // `availableFieldNames` is the current field list from the main datasource, used to validate the field map.
   const [availableFieldNames, setAvailableFieldNames] = useState<string[]>([])
+  // `structureHierarchy` is the nested tree model rendered by StructureTree.
   const [structureHierarchy, setStructureHierarchy] = useState<StructureNode[]>(
     [],
   )
+  // `isolatedTopLevelValues` stores selected first-level groups used to filter map visibility.
   const [isolatedTopLevelValues, setIsolatedTopLevelValues] = useState<
     string[]
   >([])
+
+  // -----------------------------
+  // React state: filters and tree interaction
+  // -----------------------------
+  // `selectedFilterValues` stores the active selected value for each configured filter ID.
   const [selectedFilterValues, setSelectedFilterValues] = useState<{
     [key: string]: string
   }>({})
+  // `relatedFilterOptionsById` caches dropdown options for filters that need related/lookup datasource queries.
   const [relatedFilterOptionsById, setRelatedFilterOptionsById] = useState<{
     [key: string]: FilterOption[]
   }>({})
+  // `filterSearchValues` stores the text currently typed into each searchable filter input.
   const [filterSearchValues, setFilterSearchValues] = useState<{
     [key: string]: string
   }>({})
+  // `openFilterIds` tracks which filter dropdowns are currently open.
   const [openFilterIds, setOpenFilterIds] = useState<string[]>([])
+  // `expandedNodeKeys` stores the structure tree nodes currently expanded.
   const [expandedNodeKeys, setExpandedNodeKeys] = useState<string[]>([])
+  // `selectedFeatureUid` is the widget-local selected feature identity. It remains independent of shared ExB selection.
   const [selectedFeatureUid, setSelectedFeatureUid] = useState('')
+  // `selectionError` stores selection/map synchronisation errors shown in the UI.
   const [selectionError, setSelectionError] = useState('')
+
+  // -----------------------------
+  // React state: optional linked feature attributes
+  // -----------------------------
+  // `expandedFeatureAttributeKeys` stores opened feature-attribute panels using a compound feature/attribute key.
   const [expandedFeatureAttributeKeys, setExpandedFeatureAttributeKeys] =
     useState<string[]>([])
+  // Tracks which feature-attribute panels are currently loading linked records.
   const [loadingFeatureAttributeKeys, setLoadingFeatureAttributeKeys] =
     useState<{ [key: string]: boolean }>({})
+  // Caches linked feature-attribute records by compound feature/attribute key.
   const [featureAttributeRecords, setFeatureAttributeRecords] = useState<{
     [key: string]: BasicLinkedTableRecord[]
   }>({})
+  // Stores linked feature-attribute load errors by compound feature/attribute key.
   const [featureAttributeErrors, setFeatureAttributeErrors] = useState<{
     [key: string]: string
   }>({})
 
+  // -----------------------------
+  // Refs: ArcGIS handles, DOM nodes, request guards, and stable callback bridges
+  // -----------------------------
+  // Active map highlight handle. Stored in a ref so it can be removed without causing a render.
   const highlightHandleRef = useRef<HighlightHandle | null>(null)
+  // Active map click event handle. Cleared and recreated as map/datasource dependencies change.
   const mapClickHandleRef = useRef<ViewEventHandle | null>(null)
+  // Layer view currently carrying a map visibility filter, so that filter can be cleared before applying the next one.
   const activeIsolateLayerViewRef = useRef<any | null>(null)
+  // DOM references to feature rows, keyed by feature UID, used for auto-scrolling to selection.
   const featureRowRefs = useRef<{ [key: string]: HTMLDivElement | null }>({})
+  // Last selected feature UID that was auto-scrolled, preventing repeated scroll calls for the same selection.
   const lastAutoScrolledFeatureUidRef = useRef('')
+  // Monotonic request ID used to ignore stale feature-attribute async results.
   const featureAttributeRequestIdRef = useRef(0)
+  // Monotonic request ID used to ignore stale hierarchy/related-summary async results.
   const relatedSummaryRequestIdRef = useRef(0)
+  // Monotonic request ID used to ignore stale related-filter option async results.
   const relatedFilterOptionsRequestIdRef = useRef(0)
+  // Monotonic request ID used to ignore stale async map-filter results.
   const mapFilterRequestIdRef = useRef(0)
+  // Last map visibility where clause applied by filters/isolation, kept for diagnostics.
   const lastVisibilityWhereRef = useRef('')
+  // Marker used to ignore the next datasource-selection event caused by deliberate selection clearing.
   const ignoredSelectionChangeReasonRef = useRef('')
+  // Stable bridge to the latest layer-view lookup function from async/event callbacks.
   const findMatchingJimuLayerViewRef = useRef<() => any | null>(() => null)
+  // Stable bridge used by map-click handlers to select a feature with the latest component state.
   const selectFeatureRef = useRef<(feature_uid: string) => void>(() => {})
+  // Stable bridge used by event handlers to clear selection with the latest component state.
   const clearSelectedFeatureRef = useRef<() => void>(() => {})
 
+  // -----------------------------
+  // Derived configuration
+  // -----------------------------
+  // Parse and validate the JSON field map supplied by the setting panel.
   const fieldMapParseResult = parseStructureFieldMap(props.config?.fieldMapJson)
+  // Parsed field-map object. Null means the JSON is missing or invalid.
   const structureFieldMap = fieldMapParseResult.fieldMap
+  // Related datasource keys required by summaries, breakdowns, and filters.
   const configuredRelatedSourceKeys = getRelatedSourceKeysFromFieldMap(
     structureFieldMap,
   )
+  // Map of related source key to useDataSources slot index.
   const relatedSourceKeyIndexMap = getRelatedSourceKeyIndexMap(structureFieldMap)
   // Experience Builder datasource slot assumptions:
   // useDataSources[0] = main tree datasource
@@ -1710,6 +2070,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
       ? props.useDataSources[index]
       : null
   }
+  // Runtime binding plan for each configured related datasource.
   const configuredRelatedUseDataSources = configuredRelatedSourceKeys.map((sourceKey) => {
     const dataSourceIndex = relatedSourceKeyIndexMap[sourceKey]
 
@@ -1719,9 +2080,11 @@ const Widget = (props: AllWidgetProps<Config>) => {
       useDataSource: getUseDataSourceAtIndex(dataSourceIndex),
     }
   })
+  // True when at least one related datasource has been configured in Experience Builder.
   const hasConfiguredRelatedDataSource = configuredRelatedUseDataSources.some((entry) => {
     return !!entry.useDataSource
   })
+  // Header text values, using configured values when present and defaults otherwise.
   const rawWidgetTitle = props.config?.widgetTitle
   const rawWidgetSubtitle = props.config?.widgetSubtitle
   const configuredWidgetTitle = String(rawWidgetTitle || '').trim()
@@ -1731,21 +2094,27 @@ const Widget = (props: AllWidgetProps<Config>) => {
     ? DEFAULT_WIDGET_SUBTITLE
     : configuredWidgetSubtitle
 
+  // Validation result used to block rendering when configured fields are missing from the datasource.
   const fieldValidationResult = structureFieldMap
     ? validateFieldMapAgainstAvailableFields(
         structureFieldMap,
         availableFieldNames,
       )
     : null
+  // Filter controls generated from the field map.
   const configuredFilterFields = structureFieldMap
     ? getFilteredHierarchyFields(structureFieldMap)
     : []
 
+  // Main datasource query used by the DataSourceComponent.
   const dataSourceQuery: ActiveFeatureDataSourceQuery = {
     outFields: ['*'],
     pageSize: ACTIVE_FEATURE_DS_PAGE_SIZE,
   }
 
+  /**
+   * Returns the configured main datasource ID, falling back to the active datasource instance when needed.
+   */
   const getConfiguredDataSourceId = (): string => {
     return String(
       (props.useDataSources &&
@@ -1756,6 +2125,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     )
   }
 
+  /**
+   * Returns the normalised URL for the main datasource layer.
+   */
   const getConfiguredDataSourceUrl = (): string => {
     const dataSourceJson =
       activeFeatureDs && activeFeatureDs.getDataSourceJson
@@ -1765,6 +2137,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     return normaliseUrl(dataSourceJson?.url)
   }
 
+  /**
+   * Returns the user-facing label for the main datasource.
+   */
   const getConfiguredDataSourceLabel = (): string => {
     if (!activeFeatureDs || !activeFeatureDs.getLabel) {
       return ''
@@ -1773,6 +2148,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     return activeFeatureDs.getLabel()
   }
 
+  /**
+   * Checks whether a Jimu layer view/layer belongs to the configured main datasource.
+   */
   const isConfiguredLayerMatch = (
     layerLike: any,
     dataSourceId?: string,
@@ -1785,6 +2163,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     )
   }
 
+  /**
+   * Removes the current map highlight, if one exists.
+   */
   const clearMapHighlight = () => {
     if (highlightHandleRef.current) {
       highlightHandleRef.current.remove()
@@ -1792,6 +2173,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     }
   }
 
+  /**
+   * Removes the current map click listener, if one exists.
+   */
   const clearMapClickHandle = () => {
     if (mapClickHandleRef.current) {
       mapClickHandleRef.current.remove()
@@ -1799,6 +2183,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     }
   }
 
+  /**
+   * Closes map popups and clears popup state so selection highlighting stays clean.
+   */
   const clearMapViewSelectionState = () => {
     const jsApiMapView = jimuMapView?.view as any
     const popup = jsApiMapView?.popup
@@ -1818,6 +2205,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     }
   }
 
+  /**
+   * Clears shared Experience Builder datasource selection after the widget has captured the selected UID.
+   */
   const clearFeatureDataSourceSelection = (reason: string) => {
     console.log('[TransactionDataSetTreeExplorer] clearing shared selection', {
       source: reason,
@@ -1845,6 +2235,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     }
   }
 
+  /**
+   * Finds the Jimu layer view associated with the configured main datasource.
+   */
   const findMatchingJimuLayerView = (): any | null => {
     if (!jimuMapView || !activeFeatureDs) {
       return null
@@ -1867,6 +2260,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     )
   }
 
+  /**
+   * Expands the tree path needed to reveal a feature by UID.
+   */
   const openFeatureInTree = (feature_uid: string) => {
     const nodePathKeys = getNodePathKeysForFeatureUid(
       structureHierarchy,
@@ -1885,6 +2281,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
   }
 
 
+  /**
+   * Lazy-loads related breakdown child nodes for one feature node.
+   */
   const loadRelatedBreakdownsForFeatureNode = async (node: StructureNode) => {
     const featureUid = String(node.feature_uid || '').trim()
 
@@ -1980,6 +2379,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     }
   }
 
+  /**
+   * Expands or collapses one tree node.
+   */
   const toggleNode = (nodeKey: string) => {
     setExpandedNodeKeys((previous) => {
       if (previous.includes(nodeKey)) {
@@ -1990,10 +2392,16 @@ const Widget = (props: AllWidgetProps<Config>) => {
     })
   }
 
+  /**
+   * Collapses the whole tree.
+   */
   const collapseAll = () => {
     setExpandedNodeKeys([])
   }
 
+  /**
+   * Expands a branch and preloads related breakdowns for all feature nodes under that branch.
+   */
   const expandBranch = (nodeKey: string) => {
     const matchingNode = findNodeByKey(structureHierarchy, nodeKey)
 
@@ -2015,6 +2423,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     })
   }
 
+  /**
+   * Toggles a first-level hierarchy value in the map isolation filter.
+   */
   const toggleTopLevelIsolation = (topLevelValue: string) => {
     setIsolatedTopLevelValues((previous) => {
       if (previous.includes(topLevelValue)) {
@@ -2025,10 +2436,16 @@ const Widget = (props: AllWidgetProps<Config>) => {
     })
   }
 
+  /**
+   * Clears all active top-level isolation values.
+   */
   const clearIsolation = () => {
     setIsolatedTopLevelValues([])
   }
 
+  /**
+   * Stores a selected filter value, mirrors the label into the search text, and closes the dropdown.
+   */
   const setConfiguredFilterValue = (
     filterField: ConfiguredFilterField,
     value: string,
@@ -2058,6 +2475,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     })
   }
 
+  /**
+   * Stores the current typed search text for a filter input.
+   */
   const setFilterSearchValue = (filterId: string, value: string) => {
     setFilterSearchValues((previous) => {
       return {
@@ -2067,6 +2487,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     })
   }
 
+  /**
+   * Marks one filter dropdown as open.
+   */
   const openConfiguredFilter = (filterId: string) => {
     setOpenFilterIds((previous) => {
       if (previous.includes(filterId)) {
@@ -2077,12 +2500,18 @@ const Widget = (props: AllWidgetProps<Config>) => {
     })
   }
 
+  /**
+   * Marks one filter dropdown as closed.
+   */
   const closeConfiguredFilter = (filterId: string) => {
     setOpenFilterIds((previous) => {
       return previous.filter((id) => id !== filterId)
     })
   }
 
+  /**
+   * Clears one selected filter and its search text.
+   */
   const clearConfiguredFilter = (filterId: string) => {
     console.log('[TransactionDataSetTreeExplorer] setSelectedFilterValues invoked', {
       source: 'clearConfiguredFilter',
@@ -2108,6 +2537,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     closeConfiguredFilter(filterId)
   }
 
+  /**
+   * Expands or collapses an optional linked feature-attribute panel.
+   */
   const toggleFeatureAttribute = (
     feature_uid: string,
     featureAttribute: FeatureAttributeConfig,
@@ -2126,6 +2558,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     })
   }
 
+  /**
+   * Reads available fields from the main datasource and stores them for field-map validation.
+   */
   const updateAvailableFieldNamesFromDataSource = (
     dataSource: DataSource,
   ): string[] => {
@@ -2136,10 +2571,16 @@ const Widget = (props: AllWidgetProps<Config>) => {
     return fieldNames
   }
 
+  /**
+   * Updates the loaded main-record count shown by the widget.
+   */
   const refreshRecordCountFromDataSource = (dataSource: DataSource) => {
     setRecordCount(getLoadedRecordCountFromDataSource(dataSource))
   }
 
+  /**
+   * Adds or removes a related datasource instance in the runtime datasource map.
+   */
   const setRelatedDataSourceForKey = (key: string, dataSource: DataSource | null) => {
     setRelatedDataSourceByKey((previous) => {
       const next = { ...previous }
@@ -2154,6 +2595,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     })
   }
 
+  /**
+   * Rebuilds the visible tree from loaded main records, active filters, and related summary values.
+   */
   const refreshStructureHierarchyFromDataSource = async (
     dataSource: DataSource,
     fieldNames: string[],
@@ -2180,6 +2624,8 @@ const Widget = (props: AllWidgetProps<Config>) => {
       selectedFilterValues,
     )
 
+    // Request guard: if filters/config change while async queries are running,
+    // later code checks this ID and ignores stale results.
     const requestId = relatedSummaryRequestIdRef.current + 1
     relatedSummaryRequestIdRef.current = requestId
     let filteredRecords = mainSourceFilteredRecords
@@ -2247,6 +2693,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     })
   }
 
+  /**
+   * Captures an external Experience Builder datasource selection and converts it into local widget selection.
+   */
   const acceptExternalSelectedUid = (
     dataSource: DataSource | null,
     source: 'datasource-selection',
@@ -2310,6 +2759,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     })
   }
 
+  /**
+   * Highlights and zooms the connected map to the selected feature UID.
+   */
   const syncMapToFeature = async (feature_uid: string) => {
     if (
       !jimuMapView ||
@@ -2375,6 +2827,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     }
   }
 
+  /**
+   * Stores a user-initiated feature selection from the tree or map and opens the feature path in the tree.
+   */
   const userSelectFeature = (
     feature_uid: string,
     source: 'tree-click' | 'map-click',
@@ -2416,6 +2871,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     })
   }
 
+  /**
+   * Clears widget selection, map highlight, popup state, and shared datasource selection.
+   */
   const clearSelectedFeature = () => {
     const filterDebugState = getActiveFilterDebugState(
       configuredFilterFields,
@@ -2445,6 +2903,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
   }
   clearSelectedFeatureRef.current = clearSelectedFeature
 
+  /**
+   * Handles a feature-row click from StructureTree.
+   */
   const handleFeatureClick = (node: StructureNode) => {
     if (!node.feature_uid) {
       return
@@ -2453,6 +2914,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     userSelectFeature(node.feature_uid, 'tree-click')
   }
 
+  /**
+   * Keeps the connected map highlight/zoom synchronised with the widget-local selected feature UID.
+   */
   useEffect(() => {
     if (selectedFeatureUid === '') {
       clearMapHighlight()
@@ -2463,6 +2927,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     void syncMapToFeature(selectedFeatureUid)
   }, [selectedFeatureUid, jimuMapView, activeFeatureDs])
 
+  /**
+   * Auto-scrolls the selected feature row into view after the tree path has been expanded.
+   */
   useEffect(() => {
     if (selectedFeatureUid === '') {
       lastAutoScrolledFeatureUidRef.current = ''
@@ -2481,6 +2948,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     }
   }, [selectedFeatureUid, expandedNodeKeys])
 
+  /**
+   * Loads optional linked feature-attribute records when their panels are expanded.
+   */
   useEffect(() => {
     const featureAttributes = structureFieldMap?.featureAttributes || []
 
@@ -2510,6 +2980,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
       return
     }
 
+    // Request guard for linked attribute loading.
     const requestId = featureAttributeRequestIdRef.current + 1
     featureAttributeRequestIdRef.current = requestId
 
@@ -2615,6 +3086,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     loadingFeatureAttributeKeys,
   ])
 
+  /**
+   * Rebuilds available fields, record count, and tree hierarchy whenever datasource, filters, related data, or field-map config change.
+   */
   useEffect(() => {
     if (!activeFeatureDs) {
       return
@@ -2631,6 +3105,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     props.config?.fieldMapJson,
   ])
 
+  /**
+   * Loads dropdown options for filters that rely on related or lookup datasources.
+   */
   useEffect(() => {
     if (!structureFieldMap) {
       setRelatedFilterOptionsById({})
@@ -2647,6 +3124,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
       return
     }
 
+    // Request guard for related filter option loading.
     const requestId = relatedFilterOptionsRequestIdRef.current + 1
     relatedFilterOptionsRequestIdRef.current = requestId
 
@@ -2695,6 +3173,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     void loadRelatedFilterOptions()
   }, [relatedDataSourceByKey, props.config?.fieldMapJson])
 
+  /**
+   * Applies map visibility filtering from top-level isolation and configured filters. Selection is deliberately excluded from this visibility filter.
+   */
   useEffect(() => {
     const previousIsolateLayerView = activeIsolateLayerViewRef.current
 
@@ -2720,10 +3201,12 @@ const Widget = (props: AllWidgetProps<Config>) => {
       return
     }
 
+    // Request guard for asynchronous map filter resolution.
     const requestId = mapFilterRequestIdRef.current + 1
     mapFilterRequestIdRef.current = requestId
 
     const applyMapFilter = async () => {
+      // Individual filter/isolation clauses. Joined with AND to become the layer-view filter.
       const whereParts: string[] = []
       const topLevelField = structureFieldMap.hierarchyFields[0]
       const filterDebugState = getActiveFilterDebugState(
@@ -2837,6 +3320,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     props.config?.fieldMapJson,
   ])
 
+  /**
+   * Registers the map click handler and resolves clicked graphics into feature UIDs.
+   */
   useEffect(() => {
     clearMapClickHandle()
 
@@ -2914,6 +3400,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
     }
   }, [jimuMapView, activeFeatureDs, props.config?.fieldMapJson])
 
+  /**
+   * Cleans up the map click handler when the component unmounts.
+   */
   useEffect(() => {
     return () => {
       clearMapClickHandle()
@@ -2951,6 +3440,11 @@ const Widget = (props: AllWidgetProps<Config>) => {
     )
   }
 
+  // -----------------------------
+  // Render
+  // -----------------------------
+  // The hidden DataSourceComponents establish datasource connections. The visible
+  // UI then renders configuration status, filters, action buttons, and StructureTree.
   return (
     <div style={PAGE_STYLE}>
       <DataSourceComponent
@@ -3075,6 +3569,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
         )
       })}
 
+      {/* Optional map binding. If a map widget is configured, this exposes the active JimuMapView. */}
       {props.useMapWidgetIds && props.useMapWidgetIds.length > 0 && (
         <JimuMapViewComponent
           useMapWidgetId={props.useMapWidgetIds[0]}
@@ -3097,6 +3592,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
           )}
         </div>
 
+        {/* Filter bar generated from the field map. Direct filters use main records; related filters use cached option queries. */}
         {configuredFilterFields.length > 0 && activeFeatureDs && (
           <div style={FILTER_ROW_STYLE}>
             {configuredFilterFields.map((filterField) => {
@@ -3217,6 +3713,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
           </div>
         )}
 
+        {/* Basic tree and map interaction actions. */}
         <div style={ACTION_ROW_STYLE}>
           <button
             type="button"
@@ -3258,6 +3755,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
           <div style={MESSAGE_PANEL_STYLE}>{relatedDataSourceError}</div>
         )}
 
+        {/* Main tree panel. Only renders after the field map validates against the main datasource fields. */}
         {fieldValidationResult &&
           fieldValidationResult.isValid &&
           structureFieldMap && (
