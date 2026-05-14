@@ -5,7 +5,7 @@
   "version": "1.14.15",
   "exbVersion": "1.14.0",
   "author": "Cam Cooper",
-  "description": "Reusable map-aware Experience Builder widget template.",
+  "description": "A widget that can take a transaction based data set and present it in a human readable format that can easily be interrogated.",
   "copyright": "",
   "license": "http://www.apache.org/licenses/LICENSE-2.0",
   "properties": {},
