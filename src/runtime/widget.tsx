@@ -209,6 +209,8 @@ const LINK_BUTTON_STYLE = {
   fontSize: '0.95rem',
 }
 const TREE_PANEL_STYLE = {
+  position: 'relative' as const,
+  minHeight: '140px',
   border: '1px solid #dfe7df',
   borderRadius: '8px',
   overflow: 'hidden',
@@ -234,6 +236,38 @@ const MESSAGE_PANEL_STYLE = {
   backgroundColor: '#fff5f5',
   color: '#a12626',
   fontSize: '0.85rem',
+}
+const TREE_LOADING_OVERLAY_STYLE = {
+  position: 'absolute' as const,
+  top: '3.25rem',
+  left: '50%',
+  transform: 'translateX(-50%)',
+  zIndex: 2,
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '0.5rem',
+  maxWidth: 'calc(100% - 1.5rem)',
+  padding: '0.55rem 0.75rem',
+  border: '1px solid #d7e3d9',
+  borderRadius: '999px',
+  backgroundColor: 'rgba(249, 252, 249, 0.96)',
+  boxShadow: '0 6px 18px rgba(25, 60, 35, 0.12)',
+  color: '#24352b',
+  pointerEvents: 'none' as const,
+}
+const TREE_LOADING_DOT_STYLE = {
+  width: '0.55rem',
+  height: '0.55rem',
+  borderRadius: '50%',
+  backgroundColor: ACCENT_COLOR,
+  flexShrink: 0,
+}
+const TREE_LOADING_TEXT_STYLE = {
+  minWidth: 0,
+  fontSize: '0.82rem',
+  fontWeight: 600,
+  lineHeight: 1.35,
+  color: '#24352b',
 }
 const EMPTY_STATE_STYLE = {
   padding: '0.5rem',
@@ -280,6 +314,20 @@ interface RelatedSummaryDefinition extends RelatedSummaryConfig {
 interface RelatedBreakdownDefinition extends RelatedBreakdownConfig {
   hierarchyFieldKey: string
 }
+type LoadingStepKey =
+  | 'mainDataSource'
+  | 'summaryDataSource'
+  | 'lookupDataSource'
+  | 'filterOptions'
+  | 'hierarchy'
+  | 'mapVisibility'
+type LoadingStepStatus = 'idle' | 'loading' | 'ready' | 'error' | 'skipped'
+interface LoadingStepState {
+  status: LoadingStepStatus
+  detail: string
+  errorMessage?: string
+}
+type LoadingStatusState = Record<LoadingStepKey, LoadingStepState>
 interface ViewEventHandle {
   remove: () => void
 }
@@ -350,6 +398,73 @@ const getRelatedSourceKeyIndexMap = (
     accumulator[sourceKey] = index + 1
     return accumulator
   }, {} as { [sourceKey: string]: number })
+}
+const getDefaultLoadingStatusState = (): LoadingStatusState => {
+  return {
+    mainDataSource: {
+      status: 'loading',
+      detail: 'Waiting for the main datasource.',
+    },
+    summaryDataSource: {
+      status: 'idle',
+      detail: 'Waiting for the summary / related datasource.',
+    },
+    lookupDataSource: {
+      status: 'idle',
+      detail: 'Waiting for the lookup / filter options datasource.',
+    },
+    filterOptions: {
+      status: 'idle',
+      detail: 'Waiting to load filter options.',
+    },
+    hierarchy: {
+      status: 'idle',
+      detail: 'Waiting to build the tree hierarchy.',
+    },
+    mapVisibility: {
+      status: 'skipped',
+      detail: 'Map visibility is not configured.',
+    },
+  }
+}
+const getDataSourceSecondaryLabel = (dataSource: DataSource | null): string => {
+  if (!dataSource || typeof dataSource.getLabel !== 'function') {
+    return ''
+  }
+
+  return String(dataSource.getLabel() || '').trim()
+}
+const getLoadingOverlayText = (loadingStatus: LoadingStatusState): string => {
+  const mainLabel = loadingStatus.mainDataSource.detail
+  const summaryLabel = loadingStatus.summaryDataSource.detail
+  const lookupLabel = loadingStatus.lookupDataSource.detail
+  const hasSafeLabel = (value: string): boolean => {
+    return value !== '' && !value.startsWith('Waiting ') && !value.startsWith('Loading ')
+  }
+
+  if (loadingStatus.mainDataSource.status === 'loading') {
+    return hasSafeLabel(mainLabel)
+      ? `Loading main datasource: ${mainLabel}`
+      : 'Loading main datasource...'
+  }
+
+  if (loadingStatus.summaryDataSource.status === 'loading') {
+    return hasSafeLabel(summaryLabel)
+      ? `Loading summary datasource: ${summaryLabel}`
+      : 'Loading summary datasource...'
+  }
+
+  if (loadingStatus.lookupDataSource.status === 'loading') {
+    return hasSafeLabel(lookupLabel)
+      ? `Loading lookup datasource: ${lookupLabel}`
+      : 'Loading lookup datasource...'
+  }
+
+  if (loadingStatus.filterOptions.status === 'loading') {
+    return 'Loading filter options...'
+  }
+
+  return 'Building tree...'
 }
 
 // Tree traversal helpers keep selection, expansion, and branch isolation working against nested nodes.
@@ -1619,6 +1734,10 @@ const Widget = (props: AllWidgetProps<Config>) => {
   const [structureHierarchy, setStructureHierarchy] = useState<StructureNode[]>(
     [],
   )
+  const [loadingStatus, setLoadingStatus] = useState<LoadingStatusState>(() => {
+    return getDefaultLoadingStatusState()
+  })
+  const [hasRenderedInitialHierarchy, setHasRenderedInitialHierarchy] = useState(false)
   const [isolatedTopLevelValues, setIsolatedTopLevelValues] = useState<
     string[]
   >([])
@@ -1704,6 +1823,12 @@ const Widget = (props: AllWidgetProps<Config>) => {
   const configuredFilterFields = structureFieldMap
     ? getFilteredHierarchyFields(structureFieldMap)
     : []
+  const hasSummaryDataSource = !!getUseDataSourceAtIndex(1)
+  const hasLookupDataSource = !!getUseDataSourceAtIndex(2)
+  const hasRelatedFilterOptions = configuredFilterFields.some((filterField) => {
+    return filterField.source !== 'direct'
+  })
+  const hasMapWidget = !!(props.useMapWidgetIds && props.useMapWidgetIds.length > 0)
 
   const dataSourceQuery: ActiveFeatureDataSourceQuery = {
     outFields: ['*'],
@@ -2078,6 +2203,80 @@ const Widget = (props: AllWidgetProps<Config>) => {
   const refreshRecordCountFromDataSource = (dataSource: DataSource) => {
     setRecordCount(getLoadedRecordCountFromDataSource(dataSource))
   }
+  const getRelatedStatusDataSource = (dataSourceIndex: number): DataSource | null => {
+    const matchingEntry = configuredRelatedUseDataSources.find((entry) => {
+      return entry.dataSourceIndex === dataSourceIndex
+    })
+
+    if (!matchingEntry) {
+      return null
+    }
+
+    return relatedDataSourceByKey[matchingEntry.sourceKey] || null
+  }
+  const updateLoadingStep = (
+    stepKey: LoadingStepKey,
+    nextState: Partial<LoadingStepState>,
+  ) => {
+    setLoadingStatus((previous) => {
+      return {
+        ...previous,
+        [stepKey]: {
+          ...previous[stepKey],
+          ...nextState,
+        },
+      }
+    })
+  }
+  const resetInitialLoadingStatus = () => {
+    setHasRenderedInitialHierarchy(false)
+    setLoadingStatus({
+      mainDataSource: {
+        status: 'loading',
+        detail: 'Waiting for the main datasource.',
+      },
+      summaryDataSource: hasSummaryDataSource
+        ? {
+            status: 'idle',
+            detail: 'Waiting for the summary / related datasource.',
+          }
+        : {
+            status: 'skipped',
+            detail: 'No summary / related datasource is configured.',
+          },
+      lookupDataSource: hasLookupDataSource
+        ? {
+            status: 'idle',
+            detail: 'Waiting for the lookup / filter options datasource.',
+          }
+        : {
+            status: 'skipped',
+            detail: 'No lookup / filter options datasource is configured.',
+          },
+      filterOptions: hasRelatedFilterOptions
+        ? {
+            status: 'idle',
+            detail: 'Waiting to load filter options.',
+          }
+        : {
+            status: 'skipped',
+            detail: 'No related filter options are configured.',
+          },
+      hierarchy: {
+        status: 'idle',
+        detail: 'Waiting to build the tree hierarchy.',
+      },
+      mapVisibility: hasMapWidget
+        ? {
+            status: 'loading',
+            detail: 'Waiting for the map view.',
+          }
+        : {
+            status: 'skipped',
+            detail: 'Map visibility is not configured.',
+          },
+    })
+  }
   const setRelatedDataSourceForKey = (key: string, dataSource: DataSource | null) => {
     setRelatedDataSourceByKey((previous) => {
       const next = { ...previous }
@@ -2097,6 +2296,11 @@ const Widget = (props: AllWidgetProps<Config>) => {
   ) => {
     if (!structureFieldMap) {
       setStructureHierarchy([])
+      updateLoadingStep('hierarchy', {
+        status: 'skipped',
+        detail: 'No hierarchy configuration is available.',
+        errorMessage: undefined,
+      })
       return
     }
 
@@ -2107,8 +2311,19 @@ const Widget = (props: AllWidgetProps<Config>) => {
 
     if (!validationResult.isValid) {
       setStructureHierarchy([])
+      updateLoadingStep('hierarchy', {
+        status: 'error',
+        detail: 'The hierarchy configuration is missing required fields.',
+        errorMessage: validationResult.missingFieldNames.join(', '),
+      })
       return
     }
+
+    updateLoadingStep('hierarchy', {
+      status: 'loading',
+      detail: 'Building the tree hierarchy from loaded records.',
+      errorMessage: undefined,
+    })
 
     const records = getLoadedRecordsFromDataSource(dataSource)
     const mainSourceFilteredRecords = getMainSourceFilteredRecords(
@@ -2125,6 +2340,17 @@ const Widget = (props: AllWidgetProps<Config>) => {
     let relatedSummaryValuesByFeatureUid: RelatedSummaryValuesByFeatureUid = {}
 
     try {
+      if (hasSummaryDataSource) {
+        const summaryStatusDataSource = getRelatedStatusDataSource(1)
+        const summaryLabel = getDataSourceSecondaryLabel(summaryStatusDataSource)
+
+        updateLoadingStep('summaryDataSource', {
+          status: 'loading',
+          detail: summaryLabel,
+          errorMessage: undefined,
+        })
+      }
+
       filteredRecords = await getRelatedBreakdownFilteredRecords(
         mainSourceFilteredRecords,
         getFilteredHierarchyFields(structureFieldMap),
@@ -2145,6 +2371,19 @@ const Widget = (props: AllWidgetProps<Config>) => {
         )
 
       setRelatedDataSourceError('')
+      if (hasSummaryDataSource) {
+        const summaryStatusDataSource = getRelatedStatusDataSource(1)
+        const summaryLabel = getDataSourceSecondaryLabel(summaryStatusDataSource)
+
+        updateLoadingStep('summaryDataSource', {
+          status: 'ready',
+          detail:
+            summaryLabel !== ''
+              ? summaryLabel
+              : 'Summary / related datasource is ready.',
+          errorMessage: undefined,
+        })
+      }
     } catch (error) {
       console.warn('Failed to query related summary values.', error)
       setRelatedDataSourceError(
@@ -2152,6 +2391,13 @@ const Widget = (props: AllWidgetProps<Config>) => {
           ? error.message
           : 'Failed to query the Summary Attribute View Table.',
       )
+      if (hasSummaryDataSource) {
+        updateLoadingStep('summaryDataSource', {
+          status: 'error',
+          detail: 'Failed to query the summary / related datasource.',
+          errorMessage: error instanceof Error ? error.message : undefined,
+        })
+      }
     }
 
     if (relatedSummaryRequestIdRef.current !== requestId) {
@@ -2169,6 +2415,11 @@ const Widget = (props: AllWidgetProps<Config>) => {
     const availableFeatureUids = new Set(getFeatureUidsFromNodes(hierarchy))
 
     setStructureHierarchy(hierarchy)
+    updateLoadingStep('hierarchy', {
+      status: 'ready',
+      detail: `Built ${hierarchy.length} top-level tree nodes.`,
+      errorMessage: undefined,
+    })
 
     setExpandedNodeKeys((previous) => {
       return previous.filter((nodeKey) =>
@@ -2206,7 +2457,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
       configuredFilterFields,
       selectedFilterValues,
     )
-    console.log('[TransactionDataSetTreeExplorer] external selection captured', {
+    console.log('[TransactionDataSetTreeExplorer] external selection observed', {
       source,
       selectedUid: selectedFeatureUidFromDataSource,
       activeDirectFiltersBeforeSelection: filterDebugState.activeDirectFilters,
@@ -2218,19 +2469,24 @@ const Widget = (props: AllWidgetProps<Config>) => {
     })
 
     if (selectedFeatureUid === selectedFeatureUidFromDataSource) {
-      clearFeatureDataSourceSelection('clear-shared-selection')
-      console.log('[TransactionDataSetTreeExplorer] external selection ignored', {
+      console.log('[TransactionDataSetTreeExplorer] external selection preserved', {
         source,
         selectedUid: selectedFeatureUidFromDataSource,
-        reason: 'uid-already-stored-shared-selection-cleared',
+        reason: 'uid-already-stored-shared-selection-kept',
+        selectedUidExcludedFromVisibilityFiltering: true,
       })
       return
     }
 
-    // Shared ExB datasource selection must not become the visibility source of
-    // truth for this widget. Capture the selected UID, then clear the shared
-    // selection so filters and isolate remain the only visibility drivers.
-    clearFeatureDataSourceSelection('clear-shared-selection')
+    // External datasource or map selections should be observed and mirrored
+    // locally without clearing the shared datasource selection. Explicit user
+    // clear actions still own shared-selection cleanup.
+    console.log('[TransactionDataSetTreeExplorer] external selection preserved', {
+      source,
+      selectedUid: selectedFeatureUidFromDataSource,
+      reason: 'external-selection-kept-shared-selection',
+      selectedUidExcludedFromVisibilityFiltering: true,
+    })
 
     openFeatureInTree(selectedFeatureUidFromDataSource)
     setSelectedFeatureUid(selectedFeatureUidFromDataSource)
@@ -2340,6 +2596,12 @@ const Widget = (props: AllWidgetProps<Config>) => {
     setSelectedFeatureUid(feature_uid)
     setSelectionError('')
 
+    console.log('[TransactionDataSetTreeExplorer] tree selection pushed to datasource', {
+      source,
+      selectedUid: feature_uid,
+      reason: 'local-selection-state-stored',
+      selectedUidExcludedFromVisibilityFiltering: true,
+    })
     console.log('[TransactionDataSetTreeExplorer] local selection stored', {
       source,
       selectedUid: feature_uid,
@@ -2357,6 +2619,15 @@ const Widget = (props: AllWidgetProps<Config>) => {
     )
 
     clearMapHighlight()
+    console.log('[TransactionDataSetTreeExplorer] tree/user clear', {
+      source: 'clear-shared-selection',
+      selectedUidBeforeClear: selectedFeatureUid,
+      activeDirectFiltersBeforeClear: filterDebugState.activeDirectFilters,
+      activeResolvedFiltersBeforeClear: filterDebugState.activeResolvedFilters,
+      activeIsolateBeforeClear: [...isolatedTopLevelValues],
+      finalVisibilityWhereBeforeClear: lastVisibilityWhereRef.current,
+      ...getDataSourceSelectionDebugState(activeFeatureDs),
+    })
     clearFeatureDataSourceSelection('clear-shared-selection')
     clearMapViewSelectionState()
     setSelectedFeatureUid('')
@@ -2385,6 +2656,9 @@ const Widget = (props: AllWidgetProps<Config>) => {
 
     userSelectFeature(node.feature_uid, 'tree-click')
   }
+  const shouldShowTreeLoadingOverlay =
+    !hasRenderedInitialHierarchy && structureHierarchy.length === 0
+  const treeLoadingOverlayText = getLoadingOverlayText(loadingStatus)
   useEffect(() => {
     if (selectedFeatureUid === '') {
       clearMapHighlight()
@@ -2546,6 +2820,76 @@ const Widget = (props: AllWidgetProps<Config>) => {
     loadingFeatureAttributeKeys,
   ])
   useEffect(() => {
+    if (hasRenderedInitialHierarchy) {
+      return
+    }
+
+    setLoadingStatus((previous) => {
+      return {
+        ...previous,
+        summaryDataSource: hasSummaryDataSource
+          ? previous.summaryDataSource.status === 'skipped'
+            ? {
+                status: 'idle',
+                detail: 'Waiting for the summary / related datasource.',
+              }
+            : previous.summaryDataSource
+          : {
+              status: 'skipped',
+              detail: 'No summary / related datasource is configured.',
+            },
+        lookupDataSource: hasLookupDataSource
+          ? previous.lookupDataSource.status === 'skipped'
+            ? {
+                status: 'idle',
+                detail: 'Waiting for the lookup / filter options datasource.',
+              }
+            : previous.lookupDataSource
+          : {
+              status: 'skipped',
+              detail: 'No lookup / filter options datasource is configured.',
+            },
+        filterOptions: hasRelatedFilterOptions
+          ? previous.filterOptions.status === 'skipped'
+            ? {
+                status: 'idle',
+                detail: 'Waiting to load filter options.',
+              }
+            : previous.filterOptions
+          : {
+              status: 'skipped',
+              detail: 'No related filter options are configured.',
+            },
+        mapVisibility: hasMapWidget
+          ? previous.mapVisibility.status === 'skipped'
+            ? {
+                status: 'loading',
+                detail: 'Waiting for the map view.',
+              }
+            : previous.mapVisibility
+          : {
+              status: 'skipped',
+              detail: 'Map visibility is not configured.',
+            },
+      }
+    })
+  }, [
+    hasSummaryDataSource,
+    hasLookupDataSource,
+    hasRelatedFilterOptions,
+    hasMapWidget,
+    hasRenderedInitialHierarchy,
+  ])
+  useEffect(() => {
+    if (hasRenderedInitialHierarchy) {
+      return
+    }
+
+    if (structureHierarchy.length > 0) {
+      setHasRenderedInitialHierarchy(true)
+    }
+  }, [hasRenderedInitialHierarchy, structureHierarchy.length])
+  useEffect(() => {
     if (!activeFeatureDs) {
       return
     }
@@ -2563,6 +2907,11 @@ const Widget = (props: AllWidgetProps<Config>) => {
   useEffect(() => {
     if (!structureFieldMap) {
       setRelatedFilterOptionsById({})
+      updateLoadingStep('filterOptions', {
+        status: 'skipped',
+        detail: 'No hierarchy configuration is available.',
+        errorMessage: undefined,
+      })
       return
     }
 
@@ -2573,6 +2922,11 @@ const Widget = (props: AllWidgetProps<Config>) => {
 
     if (relatedBreakdownFilters.length === 0) {
       setRelatedFilterOptionsById({})
+      updateLoadingStep('filterOptions', {
+        status: 'skipped',
+        detail: 'No related filter options are configured.',
+        errorMessage: undefined,
+      })
       return
     }
 
@@ -2581,6 +2935,12 @@ const Widget = (props: AllWidgetProps<Config>) => {
     relatedFilterOptionsRequestIdRef.current = requestId
 
     const loadRelatedFilterOptions = async () => {
+      updateLoadingStep('filterOptions', {
+        status: 'loading',
+        detail: 'Loading related filter options.',
+        errorMessage: undefined,
+      })
+
       try {
         const settledResults = await Promise.allSettled(
           relatedBreakdownFilters.map(async (filterField) => {
@@ -2612,6 +2972,11 @@ const Widget = (props: AllWidgetProps<Config>) => {
         })
 
         setRelatedFilterOptionsById(nextOptionsById)
+        updateLoadingStep('filterOptions', {
+          status: 'ready',
+          detail: 'Related filter options are ready.',
+          errorMessage: undefined,
+        })
       } catch (error) {
         if (relatedFilterOptionsRequestIdRef.current !== requestId) {
           return
@@ -2619,6 +2984,11 @@ const Widget = (props: AllWidgetProps<Config>) => {
 
         console.warn('Failed to load related breakdown filter options.', error)
         setRelatedFilterOptionsById({})
+        updateLoadingStep('filterOptions', {
+          status: 'error',
+          detail: 'Failed to load related filter options.',
+          errorMessage: error instanceof Error ? error.message : undefined,
+        })
       }
     }
 
@@ -2654,6 +3024,14 @@ const Widget = (props: AllWidgetProps<Config>) => {
     mapFilterRequestIdRef.current = requestId
 
     const applyMapFilter = async () => {
+      if (!hasRenderedInitialHierarchy) {
+        updateLoadingStep('mapVisibility', {
+          status: 'loading',
+          detail: 'Applying the initial map visibility state.',
+          errorMessage: undefined,
+        })
+      }
+
       const whereParts: string[] = []
       const topLevelField = structureFieldMap.hierarchyFields[0]
       const filterDebugState = getActiveFilterDebugState(
@@ -2733,6 +3111,13 @@ const Widget = (props: AllWidgetProps<Config>) => {
 
       if (whereParts.length === 0) {
         lastVisibilityWhereRef.current = ''
+        if (!hasRenderedInitialHierarchy) {
+          updateLoadingStep('mapVisibility', {
+            status: 'ready',
+            detail: 'Map visibility is ready.',
+            errorMessage: undefined,
+          })
+        }
         return
       }
 
@@ -2752,8 +3137,22 @@ const Widget = (props: AllWidgetProps<Config>) => {
           finalVisibilityWhere: lastVisibilityWhereRef.current,
           selectedUidExcludedFromVisibilityFiltering: true,
         })
+        if (!hasRenderedInitialHierarchy) {
+          updateLoadingStep('mapVisibility', {
+            status: 'ready',
+            detail: 'Map visibility is ready.',
+            errorMessage: undefined,
+          })
+        }
       } catch (error) {
         console.warn('Failed to apply tree viewer filter', error)
+        if (!hasRenderedInitialHierarchy) {
+          updateLoadingStep('mapVisibility', {
+            status: 'error',
+            detail: 'Failed to apply the initial map visibility state.',
+            errorMessage: error instanceof Error ? error.message : undefined,
+          })
+        }
       }
     }
 
@@ -2765,6 +3164,7 @@ const Widget = (props: AllWidgetProps<Config>) => {
     activeFeatureDs,
     relatedDataSourceByKey,
     props.config?.fieldMapJson,
+    hasRenderedInitialHierarchy,
   ])
   useEffect(() => {
     clearMapClickHandle()
@@ -2886,8 +3286,22 @@ const Widget = (props: AllWidgetProps<Config>) => {
         query={dataSourceQuery}
         widgetId={props.id}
         onDataSourceCreated={(dataSource: DataSource) => {
+          resetInitialLoadingStatus()
           setActiveFeatureDs(dataSource)
           setLoadError('')
+          updateLoadingStep('mainDataSource', {
+            status: 'ready',
+            detail:
+              getDataSourceSecondaryLabel(dataSource) !== ''
+                ? getDataSourceSecondaryLabel(dataSource)
+                : 'Main datasource is ready.',
+            errorMessage: undefined,
+          })
+          updateLoadingStep('hierarchy', {
+            status: 'loading',
+            detail: 'Preparing the initial tree hierarchy.',
+            errorMessage: undefined,
+          })
 
           const fieldNames = updateAvailableFieldNamesFromDataSource(dataSource)
 
@@ -2934,15 +3348,31 @@ const Widget = (props: AllWidgetProps<Config>) => {
         }}
         onDataSourceStatusChange={(status) => {
           setIsLoadingFeatures(status === DataSourceStatus.Loading)
+          updateLoadingStep('mainDataSource', {
+            status: status === DataSourceStatus.Loading ? 'loading' : 'ready',
+            detail:
+              status === DataSourceStatus.Loading
+                ? getDataSourceSecondaryLabel(activeFeatureDs)
+                : getDataSourceSecondaryLabel(activeFeatureDs) !== ''
+                  ? getDataSourceSecondaryLabel(activeFeatureDs)
+                  : 'Main datasource is ready.',
+            errorMessage: undefined,
+          })
         }}
         onCreateDataSourceFailed={(error) => {
           console.log('[TransactionDataSetTreeExplorer] setSelectedFilterValues invoked', {
             source: 'onCreateDataSourceFailed',
             nextValue: {},
           })
+          resetInitialLoadingStatus()
           setLoadError(
             error?.message || 'Failed to connect to the Active Feature Class.',
           )
+          updateLoadingStep('mainDataSource', {
+            status: 'error',
+            detail: 'Failed to connect to the main datasource.',
+            errorMessage: error?.message,
+          })
           setRecordCount(0)
           setAvailableFieldNames([])
           setStructureHierarchy([])
@@ -2981,6 +3411,21 @@ const Widget = (props: AllWidgetProps<Config>) => {
             onDataSourceCreated={(dataSource: DataSource) => {
               setRelatedDataSourceForKey(relatedUseDataSource.sourceKey, dataSource)
               setRelatedDataSourceError('')
+              updateLoadingStep(
+                relatedUseDataSource.dataSourceIndex === 1
+                  ? 'summaryDataSource'
+                  : 'lookupDataSource',
+                {
+                  status: 'ready',
+                  detail:
+                    getDataSourceSecondaryLabel(dataSource) !== ''
+                      ? getDataSourceSecondaryLabel(dataSource)
+                      : relatedUseDataSource.dataSourceIndex === 1
+                        ? 'Summary / related datasource is ready.'
+                        : 'Lookup / filter options datasource is ready.',
+                  errorMessage: undefined,
+                },
+              )
 
               if (activeFeatureDs) {
                 const fieldNames = updateAvailableFieldNamesFromDataSource(activeFeatureDs)
@@ -2988,11 +3433,47 @@ const Widget = (props: AllWidgetProps<Config>) => {
                 refreshStructureHierarchyFromDataSource(activeFeatureDs, fieldNames)
               }
             }}
+            onDataSourceStatusChange={(status) => {
+              updateLoadingStep(
+                relatedUseDataSource.dataSourceIndex === 1
+                  ? 'summaryDataSource'
+                  : 'lookupDataSource',
+                {
+                  status: status === DataSourceStatus.Loading ? 'loading' : 'ready',
+                  detail:
+                    status === DataSourceStatus.Loading
+                      ? relatedUseDataSource.dataSourceIndex === 1
+                        ? getDataSourceSecondaryLabel(getRelatedStatusDataSource(1))
+                        : getDataSourceSecondaryLabel(getRelatedStatusDataSource(2))
+                      : relatedUseDataSource.dataSourceIndex === 1
+                        ? getDataSourceSecondaryLabel(
+                            getRelatedStatusDataSource(1),
+                          ) || 'Summary / related datasource is ready.'
+                        : getDataSourceSecondaryLabel(
+                            getRelatedStatusDataSource(2),
+                          ) || 'Lookup / filter options datasource is ready.',
+                  errorMessage: undefined,
+                },
+              )
+            }}
             onCreateDataSourceFailed={(error) => {
               setRelatedDataSourceForKey(relatedUseDataSource.sourceKey, null)
               setRelatedDataSourceError(
                 error?.message ||
                   `Failed to connect to the configured related datasource ${relatedUseDataSource.sourceKey}.`,
+              )
+              updateLoadingStep(
+                relatedUseDataSource.dataSourceIndex === 1
+                  ? 'summaryDataSource'
+                  : 'lookupDataSource',
+                {
+                  status: 'error',
+                  detail:
+                    relatedUseDataSource.dataSourceIndex === 1
+                      ? 'Failed to connect to the summary / related datasource.'
+                      : 'Failed to connect to the lookup / filter options datasource.',
+                  errorMessage: error?.message,
+                },
               )
             }}
           >
@@ -3006,6 +3487,15 @@ const Widget = (props: AllWidgetProps<Config>) => {
           useMapWidgetId={props.useMapWidgetIds[0]}
           onActiveViewChange={(view) => {
             setJimuMapView(view)
+            if (!hasRenderedInitialHierarchy) {
+              updateLoadingStep('mapVisibility', {
+                status: view ? 'loading' : 'error',
+                detail: view
+                  ? 'Map view connected. Applying visibility state.'
+                  : 'Map view is not available.',
+                errorMessage: undefined,
+              })
+            }
           }}
         />
       )}
@@ -3188,6 +3678,12 @@ const Widget = (props: AllWidgetProps<Config>) => {
           fieldValidationResult.isValid &&
           structureFieldMap && (
             <div style={TREE_PANEL_STYLE}>
+              {shouldShowTreeLoadingOverlay && (
+                <div style={TREE_LOADING_OVERLAY_STYLE}>
+                  <span style={TREE_LOADING_DOT_STYLE} />
+                  <span style={TREE_LOADING_TEXT_STYLE}>{treeLoadingOverlayText}</span>
+                </div>
+              )}
               <div style={ISOLATE_HEADER_STYLE}>
                 <span>Isolate</span>
                 <span>Structure</span>
