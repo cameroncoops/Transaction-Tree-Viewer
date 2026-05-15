@@ -2,7 +2,7 @@
   "name": "TransactionDataSetTreeExplorer",
   "label": "TransactionDataSetTreeExplorer",
   "type": "widget",
-  "version": "1.14.15",
+  "version": "1.14.19",
   "exbVersion": "1.14.0",
   "author": "Cam Cooper",
   "description": "A widget that can take a transaction based data set and present it in a human readable format that can easily be interrogated.",
